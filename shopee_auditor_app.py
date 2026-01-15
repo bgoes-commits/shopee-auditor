@@ -206,24 +206,37 @@ def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
             col_orders = cand
             break
 
+    # Garantir que colunas numéricas estão realmente numéricas.
+    # Nos CSVs da Shopee é comum vir como texto (dtype=object), com separador de milhar '.',
+    # e às vezes decimal ',' — isso quebra comparações como (df[col] > 0).
+    for c in [col_imp, col_clk, col_cost, col_orders]:
+        if c and c in df.columns:
+            # mantém NaN para cálculos com np.where e depois trata como 0 quando fizer sentido
+            df[c] = df[c].apply(parse_br_number)
+
+    # Para métricas de volume, NaN deve virar 0
+    for c in [col_imp, col_clk, col_orders, col_cost]:
+        if c and c in df.columns:
+            df[c] = df[c].fillna(0.0)
+
     # recálculo
     if col_imp and col_clk:
-        df["ctr_calc"] = np.where(df[col_imp] > 0, df[col_clk] / df[col_imp], 0.0)
+        df["ctr_calc"] = np.where(df[col_imp].astype(float) > 0, df[col_clk].astype(float) / df[col_imp].astype(float), 0.0)
     else:
         df["ctr_calc"] = np.nan
 
     if col_clk and col_orders:
-        df["cvr_calc"] = np.where(df[col_clk] > 0, df[col_orders] / df[col_clk], 0.0)
+        df["cvr_calc"] = np.where(df[col_clk].astype(float) > 0, df[col_orders].astype(float) / df[col_clk].astype(float), 0.0)
     else:
         df["cvr_calc"] = np.nan
 
     if col_cost and col_clk:
-        df["cpc"] = np.where(df[col_clk] > 0, df[col_cost] / df[col_clk], np.nan)
+        df["cpc"] = np.where(df[col_clk].astype(float) > 0, df[col_cost].astype(float) / df[col_clk].astype(float), np.nan)
     else:
         df["cpc"] = np.nan
 
     if col_cost and col_orders:
-        df["cpa"] = np.where(df[col_orders] > 0, df[col_cost] / df[col_orders], np.nan)
+        df["cpa"] = np.where(df[col_orders].astype(float) > 0, df[col_cost].astype(float) / df[col_orders].astype(float), np.nan)
     else:
         df["cpa"] = np.nan
 
