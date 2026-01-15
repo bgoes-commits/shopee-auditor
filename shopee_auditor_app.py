@@ -583,4 +583,328 @@ if sales_file is not None:
     sales_df.columns = [c.strip() for c in sales_df.columns]
 
     # tenta adivinhar coluna de faturamento
-    cand = [c for c in sales_df.columns if any(k in c.lower() for k in ["fa]()_]()
+    cand = [c for c in sales_df.columns if any(k in c.lower() for k in ["fatur", "receita", "gmv", "venda", "valor"])]
+    col_rev_pick = st.selectbox(
+        "Selecione a coluna de faturamento/receita total do mês (vendas)",
+        options=(cand if cand else list(sales_df.columns)),
+        index=0
+    )
+    tmp = sales_df[col_rev_pick].apply(parse_number_br_aggressive)
+    sales_total_revenue = float(np.nansum(pd.to_numeric(tmp, errors="coerce")))
+    st.success(f"Faturamento total do mês (vendas): {fmt_brl(sales_total_revenue)}")
+
+# prepara df de campanhas (vem do geral se existir, senão agrega grupos)
+if ads_general_df is not None:
+    camp_df = ads_general_df.copy()
+    camp_name_col = pick_first_existing(camp_df, ["Nome do Anúncio", "Campanha", "Nome da campanha", "Nome"])
+    if camp_name_col is None:
+        camp_name_col = camp_df.columns[0]
+    camp_df["campanha_nome"] = camp_df[camp_name_col].astype(str)
+    camp_imp = camp_df.attrs.get("imp_col")
+    camp_clk = camp_df.attrs.get("clk_col")
+    camp_cost = camp_df.attrs.get("cost_col")
+    camp_orders = camp_df.attrs.get("orders_col")
+    camp_rev = camp_df.attrs.get("rev_col")
+
+    # soma por campanha_nome (por segurança)
+    g = camp_df.groupby("campanha_nome", dropna=False).agg({
+        camp_imp: "sum" if camp_imp else "sum",
+        camp_clk: "sum" if camp_clk else "sum",
+        camp_cost: "sum" if camp_cost else "sum",
+        camp_orders: "sum" if camp_orders else "sum",
+        camp_rev: "sum" if camp_rev else "sum",
+    }).reset_index()
+
+else:
+    # agrega por Campanha/Grupo
+    camp_df = ads_groups_df.copy()
+    camp_name_col = "Campanha/Grupo"
+    camp_df["campanha_nome"] = camp_df["Campanha/Grupo"].astype(str)
+
+    camp_imp = camp_df.attrs.get("imp_col")
+    camp_clk = camp_df.attrs.get("clk_col")
+    camp_cost = camp_df.attrs.get("cost_col")
+    camp_orders = camp_df.attrs.get("orders_col")
+    camp_rev = camp_df.attrs.get("rev_col")
+
+    g = camp_df.groupby("campanha_nome", dropna=False).agg({
+        camp_imp: "sum" if camp_imp else "sum",
+        camp_clk: "sum" if camp_clk else "sum",
+        camp_cost: "sum" if camp_cost else "sum",
+        camp_orders: "sum" if camp_orders else "sum",
+        camp_rev: "sum" if camp_rev else "sum",
+    }).reset_index()
+
+# renomeia colunas
+rename_map = {}
+if camp_imp: rename_map[camp_imp] = "impressões"
+if camp_clk: rename_map[camp_clk] = "cliques"
+if camp_cost: rename_map[camp_cost] = "gasto"
+if camp_orders: rename_map[camp_orders] = "pedidos"
+if camp_rev: rename_map[camp_rev] = "gmv"
+g = g.rename(columns=rename_map)
+
+# métricas
+g["ctr"] = np.where(g["impressões"].fillna(0) > 0, g["cliques"].fillna(0) / g["impressões"].fillna(0), np.nan)
+g["cvr"] = np.where(g["cliques"].fillna(0) > 0, g["pedidos"].fillna(0) / g["cliques"].fillna(0), np.nan)
+g["acos"] = np.where(g["gmv"].fillna(0) > 0, g["gasto"].fillna(0) / g["gmv"].fillna(0), np.nan)
+g["roas"] = np.where(g["gasto"].fillna(0) > 0, g["gmv"].fillna(0) / g["gasto"].fillna(0), np.nan)
+g["roi"] = np.where(g["gasto"].fillna(0) > 0, (g["gmv"].fillna(0) - g["gasto"].fillna(0)) / g["gasto"].fillna(0), np.nan)
+
+# TACOS depende do faturamento total do mês (vendas)
+if sales_total_revenue and sales_total_revenue > 0:
+    g["tacos"] = g["gasto"].fillna(0) / sales_total_revenue
+else:
+    g["tacos"] = np.nan
+
+# semáforo TACOS (meta em %)
+target = tacos_target_pct / 100.0
+def tacos_flag(x):
+    if pd.isna(x):
+        return "n/a"
+    # x é proporção
+    if x <= target:
+        return "🟢 ótimo"
+    if x <= target + (tacos_warn_2_pp / 100.0) and x >= target + (tacos_warn_1_pp / 100.0):
+        return "🟡 atenção"
+    if x > target + (tacos_warn_2_pp / 100.0):
+        return "🔴 crítico"
+    # entre 0 e +1pp
+    return "🟡 atenção"
+
+g["tacos_status"] = g["tacos"].apply(tacos_flag)
+
+# filtro e ordenação
+camp_opts = ["(todas)"] + sorted(g["campanha_nome"].dropna().unique().tolist())
+sel_camp2 = st.selectbox("Filtrar campanhas (tabela TACOS/ACOS)", camp_opts, index=0, key="camp_filter2")
+gg = g.copy()
+if sel_camp2 != "(todas)":
+    gg = gg[gg["campanha_nome"] == sel_camp2]
+
+# display
+disp_c = gg.copy()
+disp_c["impressões"] = disp_c["impressões"].apply(fmt_int)
+disp_c["cliques"] = disp_c["cliques"].apply(fmt_int)
+disp_c["pedidos"] = disp_c["pedidos"].apply(fmt_int)
+disp_c["gasto"] = disp_c["gasto"].apply(fmt_brl)
+disp_c["gmv"] = disp_c["gmv"].apply(fmt_brl)
+disp_c["ctr"] = disp_c["ctr"].apply(fmt_pct)
+disp_c["cvr"] = disp_c["cvr"].apply(fmt_pct)
+disp_c["acos"] = disp_c["acos"].apply(fmt_pct)
+disp_c["tacos"] = disp_c["tacos"].apply(fmt_pct)
+disp_c["roas"] = disp_c["roas"].apply(lambda v: "" if pd.isna(v) else f"{v:.2f}".replace(".", ","))
+disp_c["roi"] = disp_c["roi"].apply(lambda v: "" if pd.isna(v) else fmt_pct(v, digits=1))
+
+# você pediu “na campanha não preciso status”: então não mostro status aqui
+cols_campaign = ["campanha_nome", "gasto", "gmv", "acos", "tacos", "tacos_status", "roas", "roi", "impressões", "cliques", "ctr", "pedidos", "cvr"]
+st.dataframe(disp_c[cols_campaign], use_container_width=True, hide_index=True)
+
+st.caption("Obs.: TACOS só aparece quando você sobe a planilha de Vendas do mês atual (faturamento total).")
+
+# ============================
+# 6.3 Separar tabelas por grupo (arquivo de grupo)
+# ============================
+
+st.divider()
+st.subheader("Grupos: separar tabelas por campanha/grupo (resumo + anúncios)")
+
+if ads_groups_df is None:
+    st.info("Suba pelo menos 1 CSV de **Dados do grupo de anúncios** para ver esta seção.")
+else:
+    df_g = ads_groups_df.copy()
+
+    # tenta detectar linha de "total" / agregado: normalmente ID do produto é '-' ou vazio
+    id_col_g = "ID do produto" if "ID do produto" in df_g.columns else None
+
+    for grp, d in df_g.groupby("Campanha/Grupo"):
+        with st.expander(f"{grp}", expanded=False):
+            # resumo: linhas agregadas (se existirem)
+            if id_col_g and id_col_g in d.columns:
+                mask_total = d[id_col_g].astype(str).str.strip().isin(["-", "", "nan", "None"])
+                resumo = d[mask_total].copy()
+                detalhes = d[~mask_total].copy()
+            else:
+                resumo = pd.DataFrame()
+                detalhes = d.copy()
+
+            g_imp = d.attrs.get("imp_col")
+            g_clk = d.attrs.get("clk_col")
+            g_cost = d.attrs.get("cost_col")
+            g_orders = d.attrs.get("orders_col")
+            g_rev = d.attrs.get("rev_col")
+
+            if not resumo.empty:
+                st.markdown("**Resumo (linha total da campanha/grupo)**")
+                cols_r = [c for c in [
+                    "Campanha/Grupo", g_imp, g_clk, "ctr_calc", g_orders, "cvr_calc", g_rev, g_cost, "acos_calc"
+                ] if c and c in resumo.columns]
+                disp_r = make_display_df(resumo[cols_r], imp_col=g_imp, clk_col=g_clk, cost_col=g_cost, orders_col=g_orders, rev_col=g_rev)
+                st.dataframe(disp_r, use_container_width=True, hide_index=True)
+
+            st.markdown("**Anúncios (detalhe)**")
+            name_col = "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in detalhes.columns else None
+            cols_d = [c for c in [
+                "Campanha/Grupo",
+                name_col,
+                id_col_g,
+                g_imp,
+                g_clk,
+                "ctr_calc",
+                g_orders,
+                "cvr_calc",
+                g_rev,
+                g_cost,
+                "acos_calc",
+                "cpc",
+                "cpa",
+            ] if c and c in detalhes.columns]
+
+            # ordena por gasto desc (mais útil)
+            det_sorted = detalhes.sort_values(by=g_cost, ascending=False) if g_cost in detalhes.columns else detalhes
+            disp_d = make_display_df(det_sorted[cols_d], imp_col=g_imp, clk_col=g_clk, cost_col=g_cost, orders_col=g_orders, rev_col=g_rev)
+            st.dataframe(disp_d, use_container_width=True, hide_index=True)
+
+# ============================
+# 6.4 Alertas (produto/anúncio)
+# ============================
+
+st.divider()
+st.subheader("Alertas (produto/anúncio)")
+
+tabs = st.tabs([
+    "Gastando sem converter",
+    "CTR ruim",
+    "CVR ruim",
+    "Bons com pouca impressão",
+    "Mover anúncio (competição no grupo)",
+])
+
+with tabs[0]:
+    if cost_col and orders_col and clk_col:
+        wasting = alert_df[
+            (pd.to_numeric(alert_df[orders_col], errors="coerce").fillna(0) == 0)
+            & (
+                (pd.to_numeric(alert_df[clk_col], errors="coerce").fillna(0) >= min_clicks_eval)
+                | (pd.to_numeric(alert_df[cost_col], errors="coerce").fillna(0) >= float(min_spend_no_conv))
+            )
+        ].copy()
+        if wasting.empty:
+            st.info("Nenhum item no critério.")
+        else:
+            wasting["ação"] = "Pausar/remover (gastando sem converter)"
+            cols = [c for c in wasting.columns if c in {"Campanha/Grupo", "Anúncio / Nome do Produto", "ID do produto", "Nome do Anúncio"}]
+            cols += [c for c in [imp_col, clk_col, "ctr_calc", orders_col, "cvr_calc", rev_col, cost_col, "acos_calc", "cpc", "cpa", "ação"] if c and c in wasting.columns]
+            wasting_sorted = wasting.sort_values(by=cost_col, ascending=False)
+            disp = make_display_df(wasting_sorted[cols], imp_col=imp_col, clk_col=clk_col, cost_col=cost_col, orders_col=orders_col, rev_col=rev_col)
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+    else:
+        st.warning("Não encontrei colunas suficientes (gasto, cliques e pedidos/conversões).")
+
+with tabs[1]:
+    if imp_col and clk_col:
+        bad_ctr = alert_df[
+            (pd.to_numeric(alert_df[imp_col], errors="coerce").fillna(0) >= min_impressions_ctr)
+            & (pd.to_numeric(alert_df["ctr_calc"], errors="coerce").fillna(0) <= CTR_RUIM_MAX)
+        ].copy()
+        if bad_ctr.empty:
+            st.info("Nenhum item no critério.")
+        else:
+            bad_ctr["ação"] = "Ajustar preço + cauda longa + imagem (CTR ruim)"
+            cols = [c for c in bad_ctr.columns if c in {"Campanha/Grupo", "Anúncio / Nome do Produto", "ID do produto", "Nome do Anúncio"}]
+            cols += [c for c in [imp_col, clk_col, "ctr_calc", orders_col, "cvr_calc", rev_col, cost_col, "acos_calc", "ação"] if c and c in bad_ctr.columns]
+            bad_ctr_sorted = bad_ctr.sort_values(by="ctr_calc", ascending=True)
+            disp = make_display_df(bad_ctr_sorted[cols], imp_col=imp_col, clk_col=clk_col, cost_col=cost_col, orders_col=orders_col, rev_col=rev_col)
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+    else:
+        st.warning("Não encontrei colunas de impressões/cliques.")
+
+with tabs[2]:
+    if clk_col and orders_col:
+        bad_cvr = alert_df[
+            (pd.to_numeric(alert_df[clk_col], errors="coerce").fillna(0) >= min_clicks_eval)
+            & (pd.to_numeric(alert_df["cvr_calc"], errors="coerce").fillna(0) <= CVR_RUIM_MAX)
+        ].copy()
+        if bad_cvr.empty:
+            st.info("Nenhum item no critério.")
+        else:
+            bad_cvr["ação"] = "Ajustar copy + gatilhos de conversão (CVR ruim)"
+            cols = [c for c in bad_cvr.columns if c in {"Campanha/Grupo", "Anúncio / Nome do Produto", "ID do produto", "Nome do Anúncio"}]
+            cols += [c for c in [imp_col, clk_col, "ctr_calc", orders_col, "cvr_calc", rev_col, cost_col, "acos_calc", "ação"] if c and c in bad_cvr.columns]
+            bad_cvr_sorted = bad_cvr.sort_values(by="cvr_calc", ascending=True)
+            disp = make_display_df(bad_cvr_sorted[cols], imp_col=imp_col, clk_col=clk_col, cost_col=cost_col, orders_col=orders_col, rev_col=rev_col)
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+    else:
+        st.warning("Não encontrei colunas de cliques e pedidos/conversões.")
+
+with tabs[3]:
+    if imp_col:
+        good_low = alert_df[
+            (pd.to_numeric(alert_df[imp_col], errors="coerce").fillna(0) <= low_impressions_threshold)
+            & (
+                (pd.to_numeric(alert_df["ctr_calc"], errors="coerce").fillna(0) >= CTR_BOA_MIN)
+                | (pd.to_numeric(alert_df["cvr_calc"], errors="coerce").fillna(0) >= CVR_BOA_MIN)
+            )
+        ].copy()
+        if good_low.empty:
+            st.info("Nenhum item no critério.")
+        else:
+            good_low["ação"] = "Escalar: aumentar entrega / revisar estrutura"
+            cols = [c for c in good_low.columns if c in {"Campanha/Grupo", "Anúncio / Nome do Produto", "ID do produto", "Nome do Anúncio"}]
+            cols += [c for c in [imp_col, clk_col, "ctr_calc", orders_col, "cvr_calc", rev_col, cost_col, "acos_calc", "ação"] if c and c in good_low.columns]
+            good_low_sorted = good_low.sort_values(by=imp_col, ascending=True)
+            disp = make_display_df(good_low_sorted[cols], imp_col=imp_col, clk_col=clk_col, cost_col=cost_col, orders_col=orders_col, rev_col=rev_col)
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+    else:
+        st.warning("Não encontrei coluna de impressões.")
+
+with tabs[4]:
+    if ads_groups_df is None:
+        st.info("Esse alerta exige os CSVs de **Grupo de Anúncios**.")
+    else:
+        df_g = ads_groups_df.copy()
+        g_imp = df_g.attrs.get("imp_col") or "Impressões"
+        g_clk = df_g.attrs.get("clk_col") or "Cliques"
+        g_cost = df_g.attrs.get("cost_col") or "Despesas"
+        g_orders = df_g.attrs.get("orders_col") or "Conversões Diretas"
+
+        # share de gasto no grupo
+        df_g["spend_share"] = df_g.groupby("Campanha/Grupo")[g_cost].transform(lambda s: s / s.sum() if s.sum() else 0.0)
+
+        prom = df_g[
+            (pd.to_numeric(df_g[g_imp], errors="coerce").fillna(0) <= low_impressions_threshold)
+            & (
+                (pd.to_numeric(df_g["ctr_calc"], errors="coerce").fillna(0) >= CTR_BOA_MIN)
+                | (pd.to_numeric(df_g["cvr_calc"], errors="coerce").fillna(0) >= CVR_BOA_MIN)
+            )
+        ].copy()
+
+        dom = df_g[df_g["spend_share"] >= (dominance_spend_share / 100.0)][["Campanha/Grupo"]].drop_duplicates()
+        prom = prom.merge(dom, on="Campanha/Grupo", how="inner")
+
+        if prom.empty:
+            st.info("Nenhum item no critério.")
+        else:
+            prom["ação"] = "Mover para outra campanha/grupo (competição interna)"
+            prom2 = prom.copy()
+            prom2["spend_share_%"] = prom2["spend_share"] * 100
+
+            cols = [
+                "Campanha/Grupo",
+                "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in prom2.columns else None,
+                "ID do produto" if "ID do produto" in prom2.columns else None,
+                g_imp,
+                g_clk,
+                "ctr_calc",
+                g_orders,
+                "cvr_calc",
+                g_cost,
+                "spend_share_%",
+                "ação",
+            ]
+            cols = [c for c in cols if c and c in prom2.columns]
+
+            prom_sorted = prom2.sort_values(by="spend_share", ascending=False)
+            disp = make_display_df(prom_sorted[cols], imp_col=g_imp, clk_col=g_clk, cost_col=g_cost, orders_col=g_orders, rev_col=prom2.attrs.get("rev_col"))
+            if "spend_share_%" in disp.columns:
+                disp["spend_share_%"] = prom_sorted["spend_share_%"].apply(lambda v: fmt_pct(v/100.0, digits=1))
+            st.dataframe(disp, use_container_width=True, hide_index=True)
