@@ -139,7 +139,7 @@ def pick(df, cols):
 
 
 # =========================================================
-# 3) MÉTRICAS ADS (CORRIGIDO)
+# 3) MÉTRICAS ADS
 # =========================================================
 def add_ads_metrics(df):
     df = df.copy()
@@ -203,30 +203,55 @@ def fmt_pct(x):
     return f"{x*100:.2f}%".replace(".", ",")
 
 
-def display_df(df):
-    out = df.copy()
-    for c in out.columns:
-        if c in {"ctr_calc", "cvr_calc"}:
-            out[c] = out[c].apply(fmt_pct)
-        elif c in {"cpc", "cpa", "GMV", "Despesas", "Custo"}:
-            out[c] = out[c].apply(fmt_brl)
-        elif c in {"Impressões", "Cliques", "Conversões Diretas", "Conversões"}:
-            out[c] = out[c].apply(fmt_int)
-    return out
-
-
 # =========================================================
-# 5) UI
+# 5) SIDEBAR — PARÂMETROS MANUAIS
 # =========================================================
-st.title("Shopee Ads – Auditoria Profissional")
-
 with st.sidebar:
+    st.header("Parâmetros de análise")
+
+    min_impressions_ctr = st.number_input(
+        "Mín. impressões p/ avaliar CTR",
+        value=1000,
+        step=100
+    )
+
+    min_clicks_eval = st.number_input(
+        "Mín. cliques p/ avaliar CVR",
+        value=30,
+        step=5
+    )
+
+    min_spend_no_conv = st.number_input(
+        "Gasto mínimo p/ 'gastando sem converter' (R$)",
+        value=50.0,
+        step=10.0
+    )
+
+    low_impressions_threshold = st.number_input(
+        "Impressões consideradas baixas",
+        value=300,
+        step=50
+    )
+
+    dominance_spend_share = st.slider(
+        "Dominância de gasto no grupo (%)",
+        min_value=50,
+        max_value=95,
+        value=70
+    )
+
+    st.divider()
     st.header("Uploads")
     ads_general_file = st.file_uploader("CSV – Dados Gerais de Anúncios", type="csv")
-    ads_group_files = st.file_uploader("CSV – Dados do Grupo de Anúncios", type="csv", accept_multiple_files=True)
+    ads_group_files = st.file_uploader(
+        "CSV – Dados do Grupo de Anúncios",
+        type="csv",
+        accept_multiple_files=True
+    )
 
-st.divider()
-
+# =========================================================
+# 6) CARREGAMENTO ADS
+# =========================================================
 ads_general_df = None
 ads_groups_df = None
 
@@ -246,12 +271,15 @@ if ads_group_files:
         groups.append(df)
     ads_groups_df = pd.concat(groups, ignore_index=True)
 
-st.header("Resumo Ads")
+# =========================================================
+# 7) VISÃO PRINCIPAL
+# =========================================================
+st.title("Shopee Ads – Auditoria Profissional")
 
 source = ads_groups_df if ads_groups_df is not None else ads_general_df
 
 if source is None:
-    st.info("Envie ao menos um CSV.")
+    st.info("Envie ao menos um CSV para iniciar.")
     st.stop()
 
 imp = source.attrs["imp_col"]
@@ -268,5 +296,5 @@ c4.metric("Investimento", fmt_brl(source[cost].sum()))
 c5.metric("Pedidos", fmt_int(source[orders].sum()))
 c6.metric("GMV", fmt_brl(source[rev].sum()))
 
-st.subheader("Base Detalhada")
-st.dataframe(display_df(source), use_container_width=True)
+st.subheader("Base detalhada")
+st.dataframe(source, use_container_width=True)
