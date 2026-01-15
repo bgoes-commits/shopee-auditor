@@ -46,7 +46,7 @@ def classify_cvr(cvr):
 
 
 # =========================================================
-# 2) PARSING ROBUSTO SHOPEE
+# 2) PARSING SHOPEE (PONTO = MILHAR SEMPRE)
 # =========================================================
 def _s(x):
     return "" if x is None else str(x).strip()
@@ -60,23 +60,24 @@ def parse_percent(x):
         return np.nan
 
 
-def parse_number_any_locale(x):
+def parse_number_shopee(x):
+    """
+    REGRA FIXA SHOPEE ADS:
+    - '.' = milhar (REMOVER)
+    - ',' = decimal
+    """
     s = _s(x)
     if not s or s.lower() in {"nan", "-"}:
         return np.nan
 
     s = s.replace("R$", "").replace(" ", "")
-    s = re.sub(r"[^0-9,.\-]", "", s)
+    s = re.sub(r"[^0-9,]", "", s)
 
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif s.count(".") >= 2:
-        s = s.replace(".", "")
+    # remove TODOS os pontos (milhar)
+    s = s.replace(".", "")
+
+    # converte virgula em decimal
+    s = s.replace(",", ".")
 
     try:
         return float(s)
@@ -127,7 +128,7 @@ def parse_ads_table(df):
         if c in ADS_PERCENT_COLS:
             df[c] = df[c].apply(parse_percent)
         elif c in ADS_NUMERIC_COLS:
-            df[c] = df[c].apply(parse_number_any_locale)
+            df[c] = df[c].apply(parse_number_shopee)
     return df
 
 
@@ -149,25 +150,10 @@ def add_ads_metrics(df):
     col_cost = pick(df, ["Despesas", "Custo"])
     col_orders = pick(df, ["Conversões Diretas", "Conversões", "Itens Vendidos Diretos", "Itens Vendidos"])
 
-    if col_imp and col_clk:
-        df["ctr_calc"] = np.where(df[col_imp] > 0, df[col_clk] / df[col_imp], 0)
-    else:
-        df["ctr_calc"] = 0
-
-    if col_clk and col_orders:
-        df["cvr_calc"] = np.where(df[col_clk] > 0, df[col_orders] / df[col_clk], 0)
-    else:
-        df["cvr_calc"] = 0
-
-    if col_cost and col_clk:
-        df["cpc"] = np.where(df[col_clk] > 0, df[col_cost] / df[col_clk], np.nan)
-    else:
-        df["cpc"] = np.nan
-
-    if col_cost and col_orders:
-        df["cpa"] = np.where(df[col_orders] > 0, df[col_cost] / df[col_orders], np.nan)
-    else:
-        df["cpa"] = np.nan
+    df["ctr_calc"] = df[col_clk] / df[col_imp] if col_imp and col_clk else 0
+    df["cvr_calc"] = df[col_orders] / df[col_clk] if col_clk and col_orders else 0
+    df["cpc"] = df[col_cost] / df[col_clk] if col_cost and col_clk else np.nan
+    df["cpa"] = df[col_cost] / df[col_orders] if col_cost and col_orders else np.nan
 
     df["ctr_class"] = df["ctr_calc"].apply(classify_ctr)
     df["cvr_class"] = df["cvr_calc"].apply(classify_cvr)
@@ -204,63 +190,33 @@ def fmt_pct(x):
 
 
 # =========================================================
-# 5) SIDEBAR — PARÂMETROS MANUAIS
+# 5) SIDEBAR
 # =========================================================
 with st.sidebar:
     st.header("Parâmetros de análise")
-
-    min_impressions_ctr = st.number_input(
-        "Mín. impressões p/ avaliar CTR",
-        value=1000,
-        step=100
-    )
-
-    min_clicks_eval = st.number_input(
-        "Mín. cliques p/ avaliar CVR",
-        value=30,
-        step=5
-    )
-
-    min_spend_no_conv = st.number_input(
-        "Gasto mínimo p/ 'gastando sem converter' (R$)",
-        value=50.0,
-        step=10.0
-    )
-
-    low_impressions_threshold = st.number_input(
-        "Impressões consideradas baixas",
-        value=300,
-        step=50
-    )
-
-    dominance_spend_share = st.slider(
-        "Dominância de gasto no grupo (%)",
-        min_value=50,
-        max_value=95,
-        value=70
-    )
+    min_impressions_ctr = st.number_input("Mín. impressões p/ avaliar CTR", 1000, step=100)
+    min_clicks_eval = st.number_input("Mín. cliques p/ avaliar CVR", 30, step=5)
+    min_spend_no_conv = st.number_input("Gasto mínimo sem conversão (R$)", 50.0, step=10.0)
+    low_impressions_threshold = st.number_input("Impressões baixas", 300, step=50)
 
     st.divider()
     st.header("Uploads")
     ads_general_file = st.file_uploader("CSV – Dados Gerais de Anúncios", type="csv")
-    ads_group_files = st.file_uploader(
-        "CSV – Dados do Grupo de Anúncios",
-        type="csv",
-        accept_multiple_files=True
-    )
+    ads_group_files = st.file_uploader("CSV – Dados do Grupo", type="csv", accept_multiple_files=True)
+
 
 # =========================================================
-# 6) CARREGAMENTO ADS
+# 6) CARREGAMENTO
 # =========================================================
 ads_general_df = None
 ads_groups_df = None
 
 if ads_general_file:
-    df, meta = read_shopee_ads_csv(ads_general_file)
+    df, _ = read_shopee_ads_csv(ads_general_file)
     ads_general_df = add_ads_metrics(parse_ads_table(df))
 
 if ads_group_files:
-    groups = []
+    dfs = []
     for f in ads_group_files:
         df, meta = read_shopee_ads_csv(f)
         df = parse_ads_table(df)
@@ -268,20 +224,18 @@ if ads_group_files:
         df = add_ads_metrics(df)
         if "ID do produto" in df.columns:
             df = df[df["ID do produto"].astype(str) != "-"]
-        groups.append(df)
-    ads_groups_df = pd.concat(groups, ignore_index=True)
-
-# =========================================================
-# 7) VISÃO PRINCIPAL
-# =========================================================
-st.title("Shopee Ads – Auditoria Profissional")
+        dfs.append(df)
+    ads_groups_df = pd.concat(dfs, ignore_index=True)
 
 source = ads_groups_df if ads_groups_df is not None else ads_general_df
 
 if source is None:
-    st.info("Envie ao menos um CSV para iniciar.")
+    st.info("Envie ao menos um CSV.")
     st.stop()
 
+# =========================================================
+# 7) KPIs
+# =========================================================
 imp = source.attrs["imp_col"]
 clk = source.attrs["clk_col"]
 cost = source.attrs["cost_col"]
