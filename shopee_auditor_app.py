@@ -188,11 +188,14 @@ def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
     col_cost = None
     col_orders = None
 
-    for cand in ["Impressões do Produto", "Impressões"]:
+    # IMPORTANTE (Shopee): em alguns relatórios as colunas "... do Produto" vêm como '-'
+    # enquanto as colunas gerais ("Impressões", "Cliques") têm os valores reais.
+    # Por isso, preferimos primeiro as colunas gerais.
+    for cand in ["Impressões", "Impressões do Produto"]:
         if cand in df.columns:
             col_imp = cand
             break
-    for cand in ["Cliques de Produtos", "Cliques"]:
+    for cand in ["Cliques", "Cliques de Produtos"]:
         if cand in df.columns:
             col_clk = cand
             break
@@ -360,8 +363,9 @@ else:
         return float(np.nansum(ads_general_df[col])) if col in ads_general_df.columns else np.nan
 
     # escolhe colunas principais
-    imp_col = "Impressões do Produto" if "Impressões do Produto" in ads_general_df.columns else ("Impressões" if "Impressões" in ads_general_df.columns else None)
-    clk_col = "Cliques de Produtos" if "Cliques de Produtos" in ads_general_df.columns else ("Cliques" if "Cliques" in ads_general_df.columns else None)
+    # Preferir colunas gerais (as "... do Produto" às vezes vêm como '-')
+    imp_col = "Impressões" if "Impressões" in ads_general_df.columns else ("Impressões do Produto" if "Impressões do Produto" in ads_general_df.columns else None)
+    clk_col = "Cliques" if "Cliques" in ads_general_df.columns else ("Cliques de Produtos" if "Cliques de Produtos" in ads_general_df.columns else None)
     cost_col = "Despesas" if "Despesas" in ads_general_df.columns else ("Custo" if "Custo" in ads_general_df.columns else None)
     orders_col = "Conversões Diretas" if "Conversões Diretas" in ads_general_df.columns else ("Conversões" if "Conversões" in ads_general_df.columns else None)
 
