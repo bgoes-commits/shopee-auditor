@@ -46,8 +46,9 @@ def classify_cvr(cvr: float) -> str:
 
 
 # ============================
-# 2) Parsing robusto (CSV Shopee + XLSX Shopee)
+# 2) Parsing robusto (CSV Shopee)
 # ============================
+
 def _to_str(x) -> str:
     if x is None:
         return ""
@@ -90,10 +91,8 @@ def parse_number_any_locale(x) -> float:
     if s.endswith("%"):
         return np.nan
 
-    # mantém dígitos, ponto, vírgula e sinal
     s = re.sub(r"[^0-9,\.\-]", "", s)
 
-    # Se tem ambos, decide decimal pelo último separador
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
             # BR: 1.234,56
@@ -106,9 +105,6 @@ def parse_number_any_locale(x) -> float:
         s = s.replace(".", "").replace(",", ".")
     else:
         # EUA: 1234.56  OU inteiro 1234
-        # Se vier "612.085" e isso for milhar (BR sem vírgula), normalmente no XLSX.
-        # Para Ads Shopee CSV, o ponto costuma ser decimal (ex.: 32649.43).
-        # Então aqui não vamos destruir. Só se houver muitos pontos.
         if s.count(".") >= 2:
             s = s.replace(".", "")
 
@@ -175,7 +171,6 @@ ADS_NUMERIC_COLS = {
 
 
 def parse_ads_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Parse apenas colunas conhecidas; não mexe em texto (nome, id etc)."""
     df2 = df.copy()
     for c in df2.columns:
         if c in ADS_PERCENT_COLS:
@@ -200,7 +195,7 @@ def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
     col_cost = pick_first_existing(df, ["Despesas", "Custo"])
     col_orders = pick_first_existing(df, ["Conversões Diretas", "Conversões", "Itens Vendidos Diretos", "Itens Vendidos"])
 
-    # CTR / CVR com proteção de zero
+    # CTR/CVR com proteção
     if col_imp and col_clk:
         df["ctr_calc"] = np.where(df[col_imp] > 0, df[col_clk] / df[col_imp], 0.0)
     else:
@@ -228,14 +223,13 @@ def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df.attrs["clk_col"] = col_clk
     df.attrs["cost_col"] = col_cost
     df.attrs["orders_col"] = col_orders
+    df.attrs["rev_col"] = "GMV" if "GMV" in df.columns else None  # GMV fixo
 
-    # GMV fixo (você pediu GMV)
-    df.attrs["rev_col"] = "GMV" if "GMV" in df.columns else None
     return df
 
 
 # ============================
-# 3) Formatação BR (exibição)
+# 3) Formatação BR (para exibir)
 # ============================
 def fmt_brl(x) -> str:
     if x is None or (isinstance(x, float) and np.isnan(x)):
@@ -304,8 +298,8 @@ with st.sidebar:
 
 st.markdown(
     """**Como usar**
-- CSV **Dados gerais de anúncios**: resumo (muitas vezes nível de campanha/agregado).
-- CSV **Dados do grupo de anúncios**: detalhe por produto/anúncio (nome + ID do produto)."""
+- CSV **Dados gerais de anúncios**: resumo (campanha/agregado, mas pode incluir vários tipos).
+- CSV **Dados do grupo de anúncios**: detalhe por produto/anúncio (nome + ID)."""
 )
 
 colA, colB = st.columns(2)
@@ -364,35 +358,91 @@ if ads_groups_df is not None and ads_general_df is not None:
 
 alert_df = ads_groups_df if source_label.startswith("Grupos") else ads_general_df
 
-imp_col = alert_df.attrs.get("imp_col")
-clk_col = alert_df.attrs.get("clk_col")
-cost_col = alert_df.attrs.get("cost_col")
-orders_col = alert_df.attrs.get("orders_col")
-rev_col = alert_df.attrs.get("rev_col")
+# ========== NOVO: RAW (TOTAL) vs FILTERED ==========
+raw_df = alert_df.copy()  # SEMPRE total (para somar tudo)
+filtered_df = raw_df      # vai receber filtros
 
-def nsum(col):
-    if not col or col not in alert_df.columns:
+# pega colunas usadas
+imp_col = raw_df.attrs.get("imp_col")
+clk_col = raw_df.attrs.get("clk_col")
+cost_col = raw_df.attrs.get("cost_col")
+orders_col = raw_df.attrs.get("orders_col")
+rev_col = raw_df.attrs.get("rev_col")
+
+# ====== Filtros opcionais (usuário pediu) ======
+with st.sidebar:
+    st.divider()
+    st.header("Filtros (opcionais)")
+    apply_filters_to_kpis = st.checkbox("Aplicar filtros também aos KPIs", value=False)
+
+    # status varia por fonte
+    status_col = None
+    if source_label.startswith("Grupos"):
+        if "Status do Anúncio" in raw_df.columns:
+            status_col = "Status do Anúncio"
+    else:
+        if "Status" in raw_df.columns:
+            status_col = "Status"
+
+    selected_status = None
+    if status_col:
+        opts = sorted([x for x in raw_df[status_col].dropna().unique().tolist()])
+        selected_status = st.multiselect("Status", opts, default=[])
+
+    # tipos de anúncios (normalmente existe no geral)
+    type_col = "Tipos de Anúncios" if "Tipos de Anúncios" in raw_df.columns else None
+    selected_types = None
+    if type_col:
+        opts = sorted([x for x in raw_df[type_col].dropna().unique().tolist()])
+        selected_types = st.multiselect("Tipos de Anúncios", opts, default=[])
+
+    # método (no print aparece "Método de ..." — vamos capturar automaticamente)
+    method_col = None
+    for c in raw_df.columns:
+        if c.lower().startswith("método"):
+            method_col = c
+            break
+    selected_methods = None
+    if method_col:
+        opts = sorted([x for x in raw_df[method_col].dropna().unique().tolist()])
+        selected_methods = st.multiselect(method_col, opts, default=[])
+
+# aplica filtros (na tabela/alertas, e opcionalmente KPIs)
+filtered_df = raw_df.copy()
+if status_col and selected_status:
+    filtered_df = filtered_df[filtered_df[status_col].isin(selected_status)]
+if type_col and selected_types:
+    filtered_df = filtered_df[filtered_df[type_col].isin(selected_types)]
+if method_col and selected_methods:
+    filtered_df = filtered_df[filtered_df[method_col].isin(selected_methods)]
+
+kpi_df = filtered_df if apply_filters_to_kpis else raw_df
+
+def nsum(df_, col):
+    if not col or col not in df_.columns:
         return 0.0
-    return float(np.nansum(pd.to_numeric(alert_df[col], errors="coerce")))
+    return float(np.nansum(pd.to_numeric(df_[col], errors="coerce")))
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Impressões", fmt_int(nsum(imp_col)) if imp_col else "n/a")
-k2.metric("Cliques", fmt_int(nsum(clk_col)) if clk_col else "n/a")
-ctr_total = (nsum(clk_col) / nsum(imp_col)) if imp_col and clk_col and nsum(imp_col) else np.nan
+k1.metric("Impressões", fmt_int(nsum(kpi_df, imp_col)) if imp_col else "n/a")
+k2.metric("Cliques", fmt_int(nsum(kpi_df, clk_col)) if clk_col else "n/a")
+ctr_total = (nsum(kpi_df, clk_col) / nsum(kpi_df, imp_col)) if imp_col and clk_col and nsum(kpi_df, imp_col) else np.nan
 k3.metric("CTR (calc)", fmt_pct(ctr_total) if pd.notna(ctr_total) else "n/a")
-k4.metric("Gasto", fmt_brl(nsum(cost_col)) if cost_col else "n/a")
-k5.metric("Pedidos/Conv.", fmt_int(nsum(orders_col)) if orders_col else "n/a")
-k6.metric("GMV", fmt_brl(nsum(rev_col)) if rev_col else "n/a")
+k4.metric("Gasto", fmt_brl(nsum(kpi_df, cost_col)) if cost_col else "n/a")
+k5.metric("Pedidos/Conv.", fmt_int(nsum(kpi_df, orders_col)) if orders_col else "n/a")
+k6.metric("GMV", fmt_brl(nsum(kpi_df, rev_col)) if rev_col else "n/a")
 
 if ads_general_meta:
     with st.expander("Metadados do relatório (geral)", expanded=False):
         st.json(ads_general_meta)
 
-st.subheader("Base")
+# ============================
+# 6.1 Tabela base (usa FILTERED)
+# ============================
+st.subheader("Base (com filtros)")
 
-base_df = alert_df.copy()
+base_df = filtered_df.copy()
 
-# Tabela mais “cirúrgica” para grupo
 if source_label.startswith("Grupos"):
     show_cols = [c for c in [
         "Campanha/Grupo",
@@ -416,8 +466,10 @@ sorted_df = base_df.sort_values(by=cost_col, ascending=False) if cost_col in bas
 disp = make_display_df(sorted_df[show_cols], imp_col=imp_col, clk_col=clk_col, cost_col=cost_col, orders_col=orders_col, rev_col=rev_col)
 st.dataframe(disp, use_container_width=True, hide_index=True)
 
-st.divider()
-st.subheader("Alertas e ações")
+# ============================
+# 6.2 Alertas (usa FILTERED)
+# ============================
+st.subheader("Alertas e ações (com filtros)")
 
 tabs = st.tabs([
     "Gastando sem converter",
@@ -427,13 +479,15 @@ tabs = st.tabs([
     "Mover anúncio (competição no grupo)",
 ])
 
+alert_work_df = filtered_df
+
 with tabs[0]:
     if cost_col and orders_col and clk_col:
-        wasting = alert_df[
-            (pd.to_numeric(alert_df[orders_col], errors="coerce").fillna(0) == 0)
+        wasting = alert_work_df[
+            (pd.to_numeric(alert_work_df[orders_col], errors="coerce").fillna(0) == 0)
             & (
-                (pd.to_numeric(alert_df[clk_col], errors="coerce").fillna(0) >= min_clicks_eval)
-                | (pd.to_numeric(alert_df[cost_col], errors="coerce").fillna(0) >= float(min_spend_no_conv))
+                (pd.to_numeric(alert_work_df[clk_col], errors="coerce").fillna(0) >= min_clicks_eval)
+                | (pd.to_numeric(alert_work_df[cost_col], errors="coerce").fillna(0) >= float(min_spend_no_conv))
             )
         ].copy()
         if wasting.empty:
@@ -444,6 +498,7 @@ with tabs[0]:
                 "Campanha/Grupo" if "Campanha/Grupo" in wasting.columns else None,
                 "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in wasting.columns else None,
                 "ID do produto" if "ID do produto" in wasting.columns else None,
+                "Nome do Anúncio" if "Nome do Anúncio" in wasting.columns else None,
                 imp_col, clk_col, "ctr_calc", orders_col, "cvr_calc", rev_col, cost_col, "cpc", "cpa", "ação"
             ] if c and c in wasting.columns]
             wasting_sorted = wasting.sort_values(by=cost_col, ascending=False)
@@ -454,9 +509,9 @@ with tabs[0]:
 
 with tabs[1]:
     if imp_col and clk_col:
-        bad_ctr = alert_df[
-            (pd.to_numeric(alert_df[imp_col], errors="coerce").fillna(0) >= min_impressions_ctr)
-            & (pd.to_numeric(alert_df["ctr_calc"], errors="coerce").fillna(0) <= CTR_RUIM_MAX)
+        bad_ctr = alert_work_df[
+            (pd.to_numeric(alert_work_df[imp_col], errors="coerce").fillna(0) >= min_impressions_ctr)
+            & (pd.to_numeric(alert_work_df["ctr_calc"], errors="coerce").fillna(0) <= CTR_RUIM_MAX)
         ].copy()
         if bad_ctr.empty:
             st.info("Nenhum item no critério.")
@@ -466,6 +521,7 @@ with tabs[1]:
                 "Campanha/Grupo" if "Campanha/Grupo" in bad_ctr.columns else None,
                 "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in bad_ctr.columns else None,
                 "ID do produto" if "ID do produto" in bad_ctr.columns else None,
+                "Nome do Anúncio" if "Nome do Anúncio" in bad_ctr.columns else None,
                 imp_col, clk_col, "ctr_calc", "ctr_class",
                 orders_col, "cvr_calc", rev_col, cost_col, "ação"
             ] if c and c in bad_ctr.columns]
@@ -477,9 +533,9 @@ with tabs[1]:
 
 with tabs[2]:
     if clk_col and orders_col:
-        bad_cvr = alert_df[
-            (pd.to_numeric(alert_df[clk_col], errors="coerce").fillna(0) >= min_clicks_eval)
-            & (pd.to_numeric(alert_df["cvr_calc"], errors="coerce").fillna(0) <= CVR_RUIM_MAX)
+        bad_cvr = alert_work_df[
+            (pd.to_numeric(alert_work_df[clk_col], errors="coerce").fillna(0) >= min_clicks_eval)
+            & (pd.to_numeric(alert_work_df["cvr_calc"], errors="coerce").fillna(0) <= CVR_RUIM_MAX)
         ].copy()
         if bad_cvr.empty:
             st.info("Nenhum item no critério.")
@@ -489,6 +545,7 @@ with tabs[2]:
                 "Campanha/Grupo" if "Campanha/Grupo" in bad_cvr.columns else None,
                 "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in bad_cvr.columns else None,
                 "ID do produto" if "ID do produto" in bad_cvr.columns else None,
+                "Nome do Anúncio" if "Nome do Anúncio" in bad_cvr.columns else None,
                 imp_col, clk_col, "ctr_calc",
                 orders_col, "cvr_calc", "cvr_class",
                 rev_col, cost_col, "ação"
@@ -501,11 +558,11 @@ with tabs[2]:
 
 with tabs[3]:
     if imp_col:
-        good_low = alert_df[
-            (pd.to_numeric(alert_df[imp_col], errors="coerce").fillna(0) <= low_impressions_threshold)
+        good_low = alert_work_df[
+            (pd.to_numeric(alert_work_df[imp_col], errors="coerce").fillna(0) <= low_impressions_threshold)
             & (
-                (pd.to_numeric(alert_df["ctr_calc"], errors="coerce").fillna(0) >= CTR_BOA_MIN)
-                | (pd.to_numeric(alert_df["cvr_calc"], errors="coerce").fillna(0) >= CVR_BOA_MIN)
+                (pd.to_numeric(alert_work_df["ctr_calc"], errors="coerce").fillna(0) >= CTR_BOA_MIN)
+                | (pd.to_numeric(alert_work_df["cvr_calc"], errors="coerce").fillna(0) >= CVR_BOA_MIN)
             )
         ].copy()
         if good_low.empty:
@@ -516,6 +573,7 @@ with tabs[3]:
                 "Campanha/Grupo" if "Campanha/Grupo" in good_low.columns else None,
                 "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in good_low.columns else None,
                 "ID do produto" if "ID do produto" in good_low.columns else None,
+                "Nome do Anúncio" if "Nome do Anúncio" in good_low.columns else None,
                 imp_col, clk_col, "ctr_calc",
                 orders_col, "cvr_calc",
                 rev_col, cost_col, "ação"
@@ -527,10 +585,10 @@ with tabs[3]:
         st.warning("Não encontrei coluna de impressões.")
 
 with tabs[4]:
-    if ads_groups_df is None:
-        st.info("Esse alerta exige os CSVs de **Grupo de Anúncios**.")
+    if ads_groups_df is None or not source_label.startswith("Grupos"):
+        st.info("Esse alerta exige os CSVs de **Grupo de Anúncios** e a fonte 'Grupos'.")
     else:
-        df_g = ads_groups_df.copy()
+        df_g = alert_work_df.copy()
         g_imp = df_g.attrs.get("imp_col") or "Impressões"
         g_clk = df_g.attrs.get("clk_col") or "Cliques"
         g_cost = df_g.attrs.get("cost_col") or "Despesas"
@@ -574,4 +632,4 @@ with tabs[4]:
 
 st.divider()
 st.header("2) Vendas (mês vs mês)")
-st.info("Se você quiser, eu já implemento aqui a comparação dos 2 XLSX (mês anterior vs mês atual) com as regras de ADS/CTR/CVR/copy.")
+st.info("Quando você quiser, eu implemento aqui a comparação dos 2 XLSX (mês anterior vs mês atual) com as regras de ADS/CTR/CVR/copy.")
