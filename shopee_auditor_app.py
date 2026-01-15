@@ -1,130 +1,272 @@
-import streamlit as st
-import pandas as pd
+import re
+from io import StringIO
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
+import streamlit as st
 
-st.set_page_config(page_title="Shopee Ads Auditor", layout="wide")
+st.set_page_config(page_title="Shopee Ads & Vendas Auditor", layout="wide")
 
-# =============================
-# Helpers
-# =============================
-def read_shopee_csv(uploaded_file):
-    raw = uploaded_file.getvalue().decode("utf-8", errors="ignore").splitlines()
-    header_idx = 0
-    for i, line in enumerate(raw):
+# =========================================================
+# 1) REGRAS (LEI)
+# =========================================================
+CTR_OTIMA_MIN = 0.04
+CTR_OTIMA_MAX = 0.06
+CTR_BOA_MIN = 0.03
+CTR_RUIM_MAX = 0.015
+
+CVR_OTIMA_MIN = 0.03
+CVR_BOA_MIN = 0.02
+CVR_RUIM_MAX = 0.015
+
+
+def classify_ctr(ctr):
+    if pd.isna(ctr):
+        return "n/a"
+    if CTR_OTIMA_MIN <= ctr <= CTR_OTIMA_MAX:
+        return "ótima"
+    if CTR_BOA_MIN <= ctr < CTR_OTIMA_MIN:
+        return "boa"
+    if ctr <= CTR_RUIM_MAX:
+        return "ruim"
+    return "média"
+
+
+def classify_cvr(cvr):
+    if pd.isna(cvr):
+        return "n/a"
+    if cvr >= CVR_OTIMA_MIN:
+        return "ótima"
+    if cvr >= CVR_BOA_MIN:
+        return "boa"
+    if cvr <= CVR_RUIM_MAX:
+        return "ruim"
+    return "média"
+
+
+# =========================================================
+# 2) PARSING ROBUSTO SHOPEE
+# =========================================================
+def _s(x):
+    return "" if x is None else str(x).strip()
+
+
+def parse_percent(x):
+    s = _s(x).replace("%", "").replace(",", ".")
+    try:
+        return float(s) / 100
+    except Exception:
+        return np.nan
+
+
+def parse_number_any_locale(x):
+    s = _s(x)
+    if not s or s.lower() in {"nan", "-"}:
+        return np.nan
+
+    s = s.replace("R$", "").replace(" ", "")
+    s = re.sub(r"[^0-9,.\-]", "", s)
+
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif s.count(".") >= 2:
+        s = s.replace(".", "")
+
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+
+def detect_csv_header_row(text):
+    for i, line in enumerate(text.splitlines()[:120]):
         if line.startswith("#,"):
-            header_idx = i
-            break
-    df = pd.read_csv(uploaded_file, skiprows=header_idx)
+            return i
+    return 0
+
+
+def read_shopee_ads_csv(uploaded_file):
+    raw = uploaded_file.read()
+    text = raw.decode("utf-8", errors="replace")
+    header_row = detect_csv_header_row(text)
+
+    meta_lines = text.splitlines()[:header_row]
+    meta = {}
+    if meta_lines:
+        meta["titulo"] = meta_lines[0].replace("\ufeff", "").strip()
+
+    df = pd.read_csv(StringIO(text), sep=",", skiprows=header_row)
     df.columns = [c.strip() for c in df.columns]
+    return df, meta
+
+
+ADS_PERCENT_COLS = {
+    "CTR", "Taxa de Conversão", "Taxa de Conversão Direta",
+    "ROAS", "ROAS Direto", "ACOS", "ACOS Direto", "CTR do Produto"
+}
+
+ADS_NUMERIC_COLS = {
+    "Impressões", "Cliques",
+    "Conversões", "Conversões Diretas",
+    "Itens Vendidos", "Itens Vendidos Diretos",
+    "GMV", "Receita direta",
+    "Despesas", "Custo",
+    "Impressões do Produto", "Cliques de Produtos",
+}
+
+
+def parse_ads_table(df):
+    df = df.copy()
+    for c in df.columns:
+        if c in ADS_PERCENT_COLS:
+            df[c] = df[c].apply(parse_percent)
+        elif c in ADS_NUMERIC_COLS:
+            df[c] = df[c].apply(parse_number_any_locale)
     return df
 
-def to_number(s):
-    if pd.api.types.is_numeric_dtype(s):
-        return s.fillna(0)
-    s = s.astype(str).str.replace(".", "", regex=False)
-    s = s.str.replace(",", ".", regex=False)
-    return pd.to_numeric(s, errors="coerce").fillna(0)
 
-def brl(v):
-    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+def pick(df, cols):
+    for c in cols:
+        if c in df.columns:
+            return c
+    return None
 
-def pct(v):
-    return f"{v*100:.2f}%"
 
-# =============================
-# UI
-# =============================
-st.title("Shopee Ads Auditor")
+# =========================================================
+# 3) MÉTRICAS ADS (CORRIGIDO)
+# =========================================================
+def add_ads_metrics(df):
+    df = df.copy()
+
+    col_imp = pick(df, ["Impressões", "Impressões do Produto"])
+    col_clk = pick(df, ["Cliques", "Cliques de Produtos"])
+    col_cost = pick(df, ["Despesas", "Custo"])
+    col_orders = pick(df, ["Conversões Diretas", "Conversões", "Itens Vendidos Diretos", "Itens Vendidos"])
+
+    if col_imp and col_clk:
+        df["ctr_calc"] = np.where(df[col_imp] > 0, df[col_clk] / df[col_imp], 0)
+    else:
+        df["ctr_calc"] = 0
+
+    if col_clk and col_orders:
+        df["cvr_calc"] = np.where(df[col_clk] > 0, df[col_orders] / df[col_clk], 0)
+    else:
+        df["cvr_calc"] = 0
+
+    if col_cost and col_clk:
+        df["cpc"] = np.where(df[col_clk] > 0, df[col_cost] / df[col_clk], np.nan)
+    else:
+        df["cpc"] = np.nan
+
+    if col_cost and col_orders:
+        df["cpa"] = np.where(df[col_orders] > 0, df[col_cost] / df[col_orders], np.nan)
+    else:
+        df["cpa"] = np.nan
+
+    df["ctr_class"] = df["ctr_calc"].apply(classify_ctr)
+    df["cvr_class"] = df["cvr_calc"].apply(classify_cvr)
+
+    df.attrs["imp_col"] = col_imp
+    df.attrs["clk_col"] = col_clk
+    df.attrs["cost_col"] = col_cost
+    df.attrs["orders_col"] = col_orders
+    df.attrs["rev_col"] = "GMV" if "GMV" in df.columns else None
+
+    return df
+
+
+# =========================================================
+# 4) FORMATAÇÃO BR
+# =========================================================
+def fmt_brl(x):
+    if pd.isna(x):
+        return ""
+    s = f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {s}"
+
+
+def fmt_int(x):
+    if pd.isna(x):
+        return ""
+    return f"{int(x):,}".replace(",", ".")
+
+
+def fmt_pct(x):
+    if pd.isna(x):
+        return ""
+    return f"{x*100:.2f}%".replace(".", ",")
+
+
+def display_df(df):
+    out = df.copy()
+    for c in out.columns:
+        if c in {"ctr_calc", "cvr_calc"}:
+            out[c] = out[c].apply(fmt_pct)
+        elif c in {"cpc", "cpa", "GMV", "Despesas", "Custo"}:
+            out[c] = out[c].apply(fmt_brl)
+        elif c in {"Impressões", "Cliques", "Conversões Diretas", "Conversões"}:
+            out[c] = out[c].apply(fmt_int)
+    return out
+
+
+# =========================================================
+# 5) UI
+# =========================================================
+st.title("Shopee Ads – Auditoria Profissional")
 
 with st.sidebar:
     st.header("Uploads")
-    general_file = st.file_uploader("📊 Dados Gerais de Anúncios (CSV)", type="csv")
-    group_files = st.file_uploader("📦 Dados do Grupo de Anúncios (CSV)", type="csv", accept_multiple_files=True)
-    sales_prev = st.file_uploader("📈 Vendas - Mês anterior (XLSX)", type="xlsx")
-    sales_curr = st.file_uploader("📉 Vendas - Mês atual (XLSX)", type="xlsx")
+    ads_general_file = st.file_uploader("CSV – Dados Gerais de Anúncios", type="csv")
+    ads_group_files = st.file_uploader("CSV – Dados do Grupo de Anúncios", type="csv", accept_multiple_files=True)
 
-tab1, tab2, tab3 = st.tabs([
-    "1️⃣ Resumo Ads (Campanhas)",
-    "2️⃣ Operacional (Produtos / Anúncios)",
-    "3️⃣ Comparação de Vendas"
-])
+st.divider()
 
-# =============================
-# TAB 1 — CAMPANHAS
-# =============================
-with tab1:
-    if not general_file:
-        st.info("Envie o arquivo **Dados Gerais de Anúncios**.")
-    else:
-        df = read_shopee_csv(general_file)
+ads_general_df = None
+ads_groups_df = None
 
-        for c in ["Impressões", "Cliques", "Despesas", "Conversões Diretas", "GMV"]:
-            df[c] = to_number(df[c]) if c in df.columns else 0
+if ads_general_file:
+    df, meta = read_shopee_ads_csv(ads_general_file)
+    ads_general_df = add_ads_metrics(parse_ads_table(df))
 
-        imp, clk = df["Impressões"].sum(), df["Cliques"].sum()
-        spend, orders, gmv = df["Despesas"].sum(), df["Conversões Diretas"].sum(), df["GMV"].sum()
-        ctr = clk / imp if imp else 0
+if ads_group_files:
+    groups = []
+    for f in ads_group_files:
+        df, meta = read_shopee_ads_csv(f)
+        df = parse_ads_table(df)
+        df["Campanha/Grupo"] = meta.get("titulo", Path(f.name).stem)
+        df = add_ads_metrics(df)
+        if "ID do produto" in df.columns:
+            df = df[df["ID do produto"].astype(str) != "-"]
+        groups.append(df)
+    ads_groups_df = pd.concat(groups, ignore_index=True)
 
-        a,b,c,d,e,f = st.columns(6)
-        a.metric("Impressões", f"{int(imp):,}".replace(",", "."))
-        b.metric("Cliques", f"{int(clk):,}".replace(",", "."))
-        c.metric("CTR", pct(ctr))
-        d.metric("Investimento", brl(spend))
-        e.metric("Pedidos", int(orders))
-        f.metric("GMV", brl(gmv))
+st.header("Resumo Ads")
 
-        st.dataframe(df, use_container_width=True)
+source = ads_groups_df if ads_groups_df is not None else ads_general_df
 
-# =============================
-# TAB 2 — PRODUTOS
-# =============================
-with tab2:
-    if not group_files:
-        st.info("Envie os arquivos **Dados do Grupo de Anúncios**.")
-    else:
-        df = pd.concat([read_shopee_csv(f) for f in group_files])
+if source is None:
+    st.info("Envie ao menos um CSV.")
+    st.stop()
 
-        for c in ["Impressões", "Cliques", "Despesas", "Conversões Diretas", "GMV"]:
-            df[c] = to_number(df[c]) if c in df.columns else 0
+imp = source.attrs["imp_col"]
+clk = source.attrs["clk_col"]
+cost = source.attrs["cost_col"]
+orders = source.attrs["orders_col"]
+rev = source.attrs["rev_col"]
 
-        df["CTR"] = np.where(df["Impressões"] > 0, df["Cliques"] / df["Impressões"], 0)
-        df["CVR"] = np.where(df["Cliques"] > 0, df["Conversões Diretas"] / df["Cliques"], 0)
-        df["CPC"] = np.where(df["Cliques"] > 0, df["Despesas"] / df["Cliques"], 0)
-        df["CPA"] = np.where(df["Conversões Diretas"] > 0, df["Despesas"] / df["Conversões Diretas"], np.nan)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1.metric("Impressões", fmt_int(source[imp].sum()))
+c2.metric("Cliques", fmt_int(source[clk].sum()))
+c3.metric("CTR", fmt_pct(source[clk].sum() / source[imp].sum()))
+c4.metric("Investimento", fmt_brl(source[cost].sum()))
+c5.metric("Pedidos", fmt_int(source[orders].sum()))
+c6.metric("GMV", fmt_brl(source[rev].sum()))
 
-        st.dataframe(df, use_container_width=True)
-
-# =============================
-# TAB 3 — COMPARAÇÃO
-# =============================
-with tab3:
-    if not sales_prev or not sales_curr:
-        st.info("Envie os dois arquivos de vendas para comparar.")
-    else:
-        prev = pd.read_excel(sales_prev)
-        curr = pd.read_excel(sales_curr)
-
-        key = "ID do Produto"
-        if key not in prev.columns or key not in curr.columns:
-            st.error("Coluna **ID do Produto** não encontrada.")
-        else:
-            for c in ["Impressões", "Cliques", "Pedidos"]:
-                prev[c] = to_number(prev[c]) if c in prev.columns else 0
-                curr[c] = to_number(curr[c]) if c in curr.columns else 0
-
-            prev = prev.groupby(key, as_index=False).sum()
-            curr = curr.groupby(key, as_index=False).sum()
-
-            df = prev.merge(curr, on=key, how="outer", suffixes=("_prev", "_curr")).fillna(0)
-
-            def diagnose(r):
-                if r["Impressões_curr"] < r["Impressões_prev"]:
-                    return "Colocar ADS"
-                if r["Cliques_curr"] < r["Cliques_prev"]:
-                    return "Ajustar CTR (preço/imagem)"
-                if r["Pedidos_curr"] < r["Pedidos_prev"]:
-                    return "Ajustar conversão (copy)"
-                return "OK"
-
-            df["Ação recomendada"] = df.apply(diagnose, axis=1)
-            st.dataframe(df, use_container_width=True)
+st.subheader("Base Detalhada")
+st.dataframe(display_df(source), use_container_width=True)
