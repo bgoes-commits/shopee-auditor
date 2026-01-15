@@ -159,23 +159,47 @@ def read_shopee_ads_csv(uploaded_file) -> tuple[pd.DataFrame, dict]:
     return df, meta
 
 
-def to_numeric_columns(df: pd.DataFrame, percent_cols: set[str] | None = None) -> pd.DataFrame:
+def coerce_columns(
+    df: pd.DataFrame,
+    numeric_cols: set[str] | None = None,
+    percent_cols: set[str] | None = None,
+    currency_cols: set[str] | None = None,
+) -> pd.DataFrame:
+    """Converte SOMENTE colunas conhecidas.
+
+    Importante: os relatórios da Shopee têm colunas-texto com números (ex.: nome do anúncio com datas).
+    Heurísticas quebram e transformam texto em NaN. Aqui evitamos isso.
+    """
+
     df = df.copy()
+    numeric_cols = numeric_cols or set()
     percent_cols = percent_cols or set()
+    currency_cols = currency_cols or set()
+
     for c in df.columns:
         if c in percent_cols:
             df[c] = df[c].apply(parse_percent)
-        else:
-            # tenta parsear numérico, mantendo texto quando não fizer sentido
-            if df[c].dtype == object:
-                # se tiver muita coisa numérica, converte
-                sample = df[c].dropna().astype(str).head(30)
-                if len(sample) == 0:
-                    continue
-                score = sum(bool(re.search(r"\d", s)) for s in sample) / len(sample)
-                if score >= 0.6:
-                    df[c] = df[c].apply(parse_br_number)
+        elif c in numeric_cols or c in currency_cols:
+            df[c] = df[c].apply(parse_br_number)
     return df
+
+
+def fmt_percent(x) -> str:
+    if pd.isna(x):
+        return ""
+    return f"{x*100:.2f}%"
+
+
+def fmt_money(x) -> str:
+    if pd.isna(x):
+        return ""
+    return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def fmt_int(x) -> str:
+    if pd.isna(x):
+        return ""
+    return f"{int(round(float(x))):,}".replace(",", ".")
 
 
 def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
@@ -188,9 +212,8 @@ def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
     col_cost = None
     col_orders = None
 
-    # IMPORTANTE (Shopee): em alguns relatórios as colunas "... do Produto" vêm como '-'
-    # enquanto as colunas gerais ("Impressões", "Cliques") têm os valores reais.
-    # Por isso, preferimos primeiro as colunas gerais.
+    # Preferir as colunas gerais (o relatório geral normalmente traz Impressões/Cliques;
+    # as colunas "... do Produto" às vezes vêm como '-' e zeram tudo.)
     for cand in ["Impressões", "Impressões do Produto"]:
         if cand in df.columns:
             col_imp = cand
@@ -209,37 +232,24 @@ def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
             col_orders = cand
             break
 
-    # Garantir que colunas numéricas estão realmente numéricas.
-    # Nos CSVs da Shopee é comum vir como texto (dtype=object), com separador de milhar '.',
-    # e às vezes decimal ',' — isso quebra comparações como (df[col] > 0).
-    for c in [col_imp, col_clk, col_cost, col_orders]:
-        if c and c in df.columns:
-            # mantém NaN para cálculos com np.where e depois trata como 0 quando fizer sentido
-            df[c] = df[c].apply(parse_br_number)
-
-    # Para métricas de volume, NaN deve virar 0
-    for c in [col_imp, col_clk, col_orders, col_cost]:
-        if c and c in df.columns:
-            df[c] = df[c].fillna(0.0)
-
     # recálculo
     if col_imp and col_clk:
-        df["ctr_calc"] = np.where(df[col_imp].astype(float) > 0, df[col_clk].astype(float) / df[col_imp].astype(float), 0.0)
+        df["ctr_calc"] = np.where(df[col_imp] > 0, df[col_clk] / df[col_imp], 0.0)
     else:
         df["ctr_calc"] = np.nan
 
     if col_clk and col_orders:
-        df["cvr_calc"] = np.where(df[col_clk].astype(float) > 0, df[col_orders].astype(float) / df[col_clk].astype(float), 0.0)
+        df["cvr_calc"] = np.where(df[col_clk] > 0, df[col_orders] / df[col_clk], 0.0)
     else:
         df["cvr_calc"] = np.nan
 
     if col_cost and col_clk:
-        df["cpc"] = np.where(df[col_clk].astype(float) > 0, df[col_cost].astype(float) / df[col_clk].astype(float), np.nan)
+        df["cpc"] = np.where(df[col_clk] > 0, df[col_cost] / df[col_clk], np.nan)
     else:
         df["cpc"] = np.nan
 
     if col_cost and col_orders:
-        df["cpa"] = np.where(df[col_orders].astype(float) > 0, df[col_cost].astype(float) / df[col_orders].astype(float), np.nan)
+        df["cpa"] = np.where(df[col_orders] > 0, df[col_cost] / df[col_orders], np.nan)
     else:
         df["cpa"] = np.nan
 
@@ -327,8 +337,38 @@ ads_general_meta = {}
 if ads_general_file is not None:
     df, meta = read_shopee_ads_csv(ads_general_file)
 
-    percent_cols = {"CTR", "Taxa de Conversão", "Taxa de Conversão Direta", "CTR do Produto"}
-    df = to_numeric_columns(df, percent_cols=percent_cols)
+    ads_percent_cols = {
+        "CTR",
+        "CTR do Produto",
+        "Taxa de Conversão",
+        "Taxa de Conversão Direta",
+        "ACOS",
+        "ACOS Direto",
+        "ROAS",
+        "ROAS Direto",
+    }
+    ads_numeric_cols = {
+        "Impressões",
+        "Cliques",
+        "Impressões do Produto",
+        "Cliques de Produtos",
+        "Conversões",
+        "Conversões Diretas",
+        "Itens Vendidos",
+        "Itens Vendidos Diretos",
+    }
+    ads_currency_cols = {
+        "Despesas",
+        "Custo",
+        "GMV",
+        "Receita direta",
+        "Custo por Conversão",
+        "Custo por Conversão Direta",
+        "Custo por Conversão",
+        "Custo por Conversão Direta",
+    }
+
+    df = coerce_columns(df, numeric_cols=ads_numeric_cols, percent_cols=ads_percent_cols, currency_cols=ads_currency_cols)
     ads_general_df = add_ads_metrics(df)
     ads_general_meta = meta
 
@@ -341,8 +381,7 @@ if ads_group_files:
         group_name = metag.get("titulo", "").replace("Ad Group -", "").replace("Report - Shopee Brasil", "").strip()
         dfg["Grupo"] = group_name if group_name else Path(getattr(f, "name", "grupo")).stem
 
-        percent_cols = {"CTR", "Taxa de Conversão", "Taxa de Conversão Direta", "ACOS", "ACOS Direto"}
-        dfg = to_numeric_columns(dfg, percent_cols=percent_cols)
+        dfg = coerce_columns(dfg, numeric_cols=ads_numeric_cols, percent_cols=ads_percent_cols, currency_cols=ads_currency_cols)
         dfg = add_ads_metrics(dfg)
         group_dfs.append(dfg)
 
@@ -362,19 +401,21 @@ else:
     def _sum(col):
         return float(np.nansum(ads_general_df[col])) if col in ads_general_df.columns else np.nan
 
-    # escolhe colunas principais
-    # Preferir colunas gerais (as "... do Produto" às vezes vêm como '-')
+    # escolhe colunas principais (preferir gerais)
     imp_col = "Impressões" if "Impressões" in ads_general_df.columns else ("Impressões do Produto" if "Impressões do Produto" in ads_general_df.columns else None)
     clk_col = "Cliques" if "Cliques" in ads_general_df.columns else ("Cliques de Produtos" if "Cliques de Produtos" in ads_general_df.columns else None)
     cost_col = "Despesas" if "Despesas" in ads_general_df.columns else ("Custo" if "Custo" in ads_general_df.columns else None)
     orders_col = "Conversões Diretas" if "Conversões Diretas" in ads_general_df.columns else ("Conversões" if "Conversões" in ads_general_df.columns else None)
 
-    kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+    faturamento_col = "Receita direta" if "Receita direta" in ads_general_df.columns else ("GMV" if "GMV" in ads_general_df.columns else None)
+
+    kpi1, kpi2, kpi3, kpi4, kpi5, kpi6 = st.columns(6)
     kpi1.metric("Impressões", f"{_sum(imp_col):,.0f}" if imp_col else "n/a")
     kpi2.metric("Cliques", f"{_sum(clk_col):,.0f}" if clk_col else "n/a")
     kpi3.metric("CTR (calc)", f"{( _sum(clk_col) / _sum(imp_col) * 100):.2f}%" if imp_col and clk_col and _sum(imp_col) > 0 else "n/a")
     kpi4.metric("Gasto", f"R$ {_sum(cost_col):,.2f}" if cost_col else "n/a")
     kpi5.metric("Conversões/Pedidos", f"{_sum(orders_col):,.0f}" if orders_col else "n/a")
+    kpi6.metric("Faturamento", fmt_money(_sum(faturamento_col)) if faturamento_col else "n/a")
 
     with st.expander("Metadados do relatório", expanded=False):
         st.json(ads_general_meta)
@@ -397,6 +438,7 @@ else:
         "Status",
         "Tipos de Anúncios",
         "ID do produto",
+        faturamento_col,
         imp_col,
         clk_col,
         "ctr_calc",
@@ -409,11 +451,31 @@ else:
         "cpa",
     ] if c and c in df_show.columns]
 
-    st.dataframe(
-        df_show[display_cols].sort_values(by=cost_col, ascending=False) if cost_col in df_show.columns else df_show[display_cols],
-        use_container_width=True,
-        hide_index=True,
-    )
+    df_base = df_show[display_cols].copy()
+    if cost_col and cost_col in df_base.columns:
+        df_base = df_base.sort_values(by=cost_col, ascending=False)
+
+    fmt_map = {
+        "ctr_calc": fmt_percent,
+        "cvr_calc": fmt_percent,
+        "CTR": fmt_percent,
+        "Taxa de Conversão": fmt_percent,
+        "Taxa de Conversão Direta": fmt_percent,
+        "cpc": fmt_money,
+        "cpa": fmt_money,
+    }
+    if imp_col:
+        fmt_map[imp_col] = fmt_int
+    if clk_col:
+        fmt_map[clk_col] = fmt_int
+    if orders_col:
+        fmt_map[orders_col] = fmt_int
+    if cost_col:
+        fmt_map[cost_col] = fmt_money
+    if faturamento_col and faturamento_col in df_base.columns:
+        fmt_map[faturamento_col] = fmt_money
+
+    st.dataframe(df_base.style.format(fmt_map), use_container_width=True, hide_index=True)
 
     st.subheader("Alertas e ações")
 
@@ -434,11 +496,8 @@ else:
                 & ((ads_general_df[clk_col] >= min_clicks_eval) | (ads_general_df[cost_col] >= min_spend_no_conv))
             ].copy()
             wasting["ação"] = "Pausar/remover (gastando sem converter)"
-            st.dataframe(
-                wasting.sort_values(by=cost_col, ascending=False)[display_cols + ["ação"] if "ação" not in display_cols else display_cols],
-                use_container_width=True,
-                hide_index=True,
-            )
+            cols = [c for c in display_cols if c in wasting.columns] + ["ação"]
+            st.dataframe(wasting.sort_values(by=cost_col, ascending=False)[cols].style.format(fmt_map), use_container_width=True, hide_index=True)
         else:
             st.warning("Não encontrei colunas necessárias (gasto, cliques e conversões).")
 
@@ -448,7 +507,7 @@ else:
             bad_ctr = ads_general_df[(ads_general_df[imp_col] >= min_impressions_ctr) & (ads_general_df["ctr_calc"] <= CTR_RUIM_MAX)].copy()
             bad_ctr["ação"] = "Ajustar preço + cauda longa + imagem (CTR ruim)"
             cols = [c for c in display_cols if c in bad_ctr.columns] + ["ação"]
-            st.dataframe(bad_ctr.sort_values(by="ctr_calc", ascending=True)[cols], use_container_width=True, hide_index=True)
+            st.dataframe(bad_ctr.sort_values(by="ctr_calc", ascending=True)[cols].style.format(fmt_map), use_container_width=True, hide_index=True)
         else:
             st.warning("Não encontrei colunas de impressões/cliques para calcular CTR.")
 
@@ -458,7 +517,7 @@ else:
             bad_cvr = ads_general_df[(ads_general_df[clk_col] >= min_clicks_eval) & (ads_general_df["cvr_calc"] <= CVR_RUIM_MAX)].copy()
             bad_cvr["ação"] = "Ajustar copy + gatilhos de conversão (CVR ruim)"
             cols = [c for c in display_cols if c in bad_cvr.columns] + ["ação"]
-            st.dataframe(bad_cvr.sort_values(by="cvr_calc", ascending=True)[cols], use_container_width=True, hide_index=True)
+            st.dataframe(bad_cvr.sort_values(by="cvr_calc", ascending=True)[cols].style.format(fmt_map), use_container_width=True, hide_index=True)
         else:
             st.warning("Não encontrei colunas de cliques/conversões para calcular CVR.")
 
@@ -471,7 +530,7 @@ else:
             ].copy()
             good_low["ação"] = "Aumentar entrega / revisar estrutura"
             cols = [c for c in display_cols if c in good_low.columns] + ["ação"]
-            st.dataframe(good_low.sort_values(by=imp_col, ascending=True)[cols], use_container_width=True, hide_index=True)
+            st.dataframe(good_low.sort_values(by=imp_col, ascending=True)[cols].style.format(fmt_map), use_container_width=True, hide_index=True)
         else:
             st.warning("Não encontrei coluna de impressões.")
 
@@ -524,11 +583,18 @@ else:
                     "ação",
                 ] if c and c in prom.columns]
 
-                # formata spend_share
-                prom2 = prom.copy()
-                prom2["spend_share"] = (prom2["spend_share"] * 100).round(1)
+                fmt_map_g = fmt_map.copy()
+                fmt_map_g["spend_share"] = fmt_percent
+                if g_cost:
+                    fmt_map_g[g_cost] = fmt_money
+                if g_imp:
+                    fmt_map_g[g_imp] = fmt_int
+                if g_clk:
+                    fmt_map_g[g_clk] = fmt_int
+                if g_orders and g_orders in prom.columns:
+                    fmt_map_g[g_orders] = fmt_int
 
-                st.dataframe(prom2.sort_values(by="spend_share", ascending=False)[show_cols], use_container_width=True, hide_index=True)
+                st.dataframe(prom.sort_values(by="spend_share", ascending=False)[show_cols].style.format(fmt_map_g), use_container_width=True, hide_index=True)
 
 
 # ============================
@@ -573,12 +639,15 @@ else:
 
         # agregação por item
         def agg_sales(df):
-            out = df.groupby("item_id", as_index=False).agg({
+            agg_map = {
                 "Vendas (BRL)": "sum" if "Vendas (BRL)" in df.columns else "first",
                 "Impressões de Produto": "sum" if "Impressões de Produto" in df.columns else "first",
                 "Cliques Por Produto": "sum" if "Cliques Por Produto" in df.columns else "first",
                 "Pedidos": "sum" if "Pedidos" in df.columns else "first",
-            })
+            }
+            if "Produto_nome" in df.columns:
+                agg_map["Produto_nome"] = "first"
+            out = df.groupby("item_id", as_index=False).agg(agg_map)
             # recomputa CTR e CVR
             if "Impressões de Produto" in out.columns and "Cliques Por Produto" in out.columns:
                 out["ctr"] = np.where(out["Impressões de Produto"] > 0, out["Cliques Por Produto"] / out["Impressões de Produto"], 0.0)
@@ -645,6 +714,7 @@ else:
 
         show_cols = [
             "item_id",
+            "curr_Produto_nome" if "curr_Produto_nome" in drops.columns else None,
             "prev_Vendas (BRL)",
             "curr_Vendas (BRL)",
             "delta_Vendas (BRL)",
@@ -659,13 +729,24 @@ else:
             "delta_cvr_pct",
             "acao_recomendada",
         ]
-        show_cols = [c for c in show_cols if c in drops.columns]
+        show_cols = [c for c in show_cols if c and c in drops.columns]
 
         if len(drops) == 0:
             st.write("Nenhuma queda detectada pelos critérios de delta.")
         else:
+            fmt_sales = {}
+            for c in show_cols:
+                if "Vendas (BRL)" in c or c in {"delta_Vendas (BRL)"}:
+                    fmt_sales[c] = fmt_money
+                elif c.endswith("_ctr") or c.endswith("_cvr") or c in {"prev_ctr", "curr_ctr", "prev_cvr", "curr_cvr"}:
+                    fmt_sales[c] = fmt_percent
+                elif c.endswith("_pct"):
+                    fmt_sales[c] = fmt_percent
+                elif "Impressões" in c or "Cliques" in c or "Pedidos" in c:
+                    fmt_sales[c] = fmt_int
+
             st.dataframe(
-                drops.sort_values(by="delta_Vendas (BRL)", ascending=True)[show_cols].head(200),
+                drops.sort_values(by="delta_Vendas (BRL)", ascending=True)[show_cols].head(200).style.format(fmt_sales),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -681,6 +762,7 @@ else:
 
             opp_cols = [
                 "item_id",
+                "curr_Produto_nome" if "curr_Produto_nome" in opp.columns else None,
                 "curr_Vendas (BRL)",
                 "curr_Impressões de Produto",
                 "curr_Cliques Por Produto" if "curr_Cliques Por Produto" in opp.columns else None,
@@ -691,7 +773,16 @@ else:
             ]
             opp_cols = [c for c in opp_cols if c and c in opp.columns]
 
-            st.dataframe(opp.sort_values(by="curr_Vendas (BRL)", ascending=False)[opp_cols].head(200), use_container_width=True, hide_index=True)
+            fmt_opp = {}
+            for c in opp_cols:
+                if "Vendas (BRL)" in c:
+                    fmt_opp[c] = fmt_money
+                elif c in {"curr_ctr", "curr_cvr"}:
+                    fmt_opp[c] = fmt_percent
+                elif "Impressões" in c or "Cliques" in c or "Pedidos" in c:
+                    fmt_opp[c] = fmt_int
+
+            st.dataframe(opp.sort_values(by="curr_Vendas (BRL)", ascending=False)[opp_cols].head(200).style.format(fmt_opp), use_container_width=True, hide_index=True)
         else:
             st.warning("Não encontrei colunas necessárias nas planilhas de vendas para calcular oportunidades.")
 
