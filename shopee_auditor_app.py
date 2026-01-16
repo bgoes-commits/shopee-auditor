@@ -59,13 +59,16 @@ def parse_number_br_aggressive(x) -> float:
         return np.nan
 
     if "," in s:
+        # BR: remove milhares com ponto e troca vírgula decimal por ponto
         s = s.replace(".", "")
         s = s.replace(",", ".")
     else:
+        # sem vírgula: pode ser 612.085 (milhar) ou 32649.43 (decimal)
         if s.count(".") >= 2:
             s = s.replace(".", "")
         elif s.count(".") == 1:
             left, right = s.split(".")
+            # se 3 dígitos depois do ponto -> provavelmente milhar
             if right.isdigit() and len(right) == 3 and left.replace("-", "").isdigit():
                 s = left + right
 
@@ -149,10 +152,10 @@ def fmt_pp(delta_fraction: float, digits: int = 2) -> str:
 # ============================
 def detect_csv_header_row(text: str) -> int:
     lines = text.splitlines()
-    for i, line in enumerate(lines[:500]):
+    for i, line in enumerate(lines[:800]):
         if line.startswith("#,") or line.startswith("#;"):
             return i
-    for i, line in enumerate(lines[:800]):
+    for i, line in enumerate(lines[:1200]):
         if "Anúncio / Nome do Produto" in line and "ID do produto" in line:
             return i
     return 0
@@ -249,9 +252,6 @@ def add_ads_metrics(df: pd.DataFrame, *, imp_col, clk_col, cost_col, orders_col,
     df["ctr_calc"] = np.where((imp_col and clk_col and df[imp_col] > 0), df[clk_col] / df[imp_col], np.nan)
     df["cvr_calc"] = np.where((clk_col and orders_col and df[clk_col] > 0), df[orders_col] / df[clk_col], np.nan)
 
-    df["cpc"] = np.where((cost_col and clk_col and df[clk_col] > 0), df[cost_col] / df[clk_col], np.nan)
-    df["cpa"] = np.where((cost_col and orders_col and df[orders_col] > 0), df[cost_col] / df[orders_col], np.nan)
-
     df["acos_calc"] = np.where((cost_col and rev_col and df[rev_col] > 0), df[cost_col] / df[rev_col], np.nan)
     df["roas_calc"] = np.where((cost_col and df[cost_col] > 0), df[rev_col] / df[cost_col], np.nan) if (cost_col and rev_col) else np.nan
 
@@ -316,26 +316,23 @@ def make_excel_export(tables: dict[str, pd.DataFrame]) -> bytes:
 
 
 # ============================
-# 6) MoM (Ads): sinal principal GMV e "diminuir ROAS" quando já performou antes
+# 6) MoM (Ads): sinal primário GMV e ação "diminuir ROAS"
 # ============================
-def mom_signal_and_reasons_ads(
+def mom_signal_reasons_action_ads(
     gmv_prev: float, gmv_curr: float,
     imp_prev: float, imp_curr: float,
     clk_prev: float, clk_curr: float,
     ctr_prev: float, ctr_curr: float,
     cvr_prev: float, cvr_curr: float,
-    pedidos_prev: float, pedidos_curr: float,
     roas_prev: float, roas_curr: float,
     roas_bom_threshold: float,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """
-    - Sinal primário: GMV (faturamento Ads) caiu vs mês anterior.
-    - Se GMV caiu: listar o que caiu junto.
-    - REGRA EXTRA (pedido do Brenno):
-      Se no período anterior o faturamento era bom e caiu agora -> DIMINUIR ROAS.
-      Definição prática: GMV_prev > 0 e ROAS_prev >= roas_bom_threshold e GMV_curr < GMV_prev.
-      (e normalmente há queda de entrega: impressões/cliques).
+    - Sinal primário: GMV caiu vs mês anterior.
+    - Motivos: o que caiu junto.
+    - Ação: o que fazer (inclui "DIMINUIR ROAS" quando já performou antes e caiu agora).
     """
+    # sinal primário
     if pd.notna(gmv_prev) and gmv_prev > 0 and pd.notna(gmv_curr):
         if gmv_curr < gmv_prev:
             sinal = "🔴"
@@ -346,45 +343,54 @@ def mom_signal_and_reasons_ads(
     else:
         sinal = "🟡"
 
-    reasons = []
+    motivos = []
+    acao = "Monitorar"
+
     if sinal == "🔴":
         caiu_imp = pd.notna(imp_prev) and imp_prev > 0 and pd.notna(imp_curr) and imp_curr < imp_prev
         caiu_clk = pd.notna(clk_prev) and clk_prev > 0 and pd.notna(clk_curr) and clk_curr < clk_prev
+        caiu_ctr = pd.notna(ctr_prev) and pd.notna(ctr_curr) and ctr_curr < ctr_prev
+        caiu_cvr = pd.notna(cvr_prev) and pd.notna(cvr_curr) and cvr_curr < cvr_prev
 
         if caiu_imp:
-            reasons.append(f"Impressões caíram ({fmt_int(imp_prev)} → {fmt_int(imp_curr)})")
+            motivos.append("Impressões caíram")
         if caiu_clk:
-            reasons.append(f"Cliques caíram ({fmt_int(clk_prev)} → {fmt_int(clk_curr)})")
-        if pd.notna(ctr_prev) and pd.notna(ctr_curr) and ctr_curr < ctr_prev:
-            reasons.append(f"CTR caiu ({fmt_pct(ctr_prev)} → {fmt_pct(ctr_curr)})")
-        if pd.notna(cvr_prev) and pd.notna(cvr_curr) and cvr_curr < cvr_prev:
-            reasons.append(f"CVR caiu ({fmt_pct(cvr_prev)} → {fmt_pct(cvr_curr)})")
-        if pd.notna(pedidos_prev) and pedidos_prev > 0 and pd.notna(pedidos_curr) and pedidos_curr < pedidos_prev:
-            reasons.append(f"Pedidos caíram ({fmt_int(pedidos_prev)} → {fmt_int(pedidos_curr)})")
+            motivos.append("Cliques caíram")
+        if caiu_ctr:
+            motivos.append("CTR caiu")
+        if caiu_cvr:
+            motivos.append("CVR caiu")
 
-        # ✅ regra "diminuir ROAS"
-        ja_performou_bem = (pd.notna(gmv_prev) and gmv_prev > 0 and pd.notna(roas_prev) and roas_prev >= roas_bom_threshold)
+        # ✅ regra Brenno: se no período anterior performou bem e caiu → diminuir ROAS
+        ja_performou_bem = (
+            pd.notna(gmv_prev) and gmv_prev > 0
+            and pd.notna(roas_prev) and roas_prev >= roas_bom_threshold
+        )
         if ja_performou_bem:
-            reasons.append("No período anterior performou bem e caiu agora → DIMINUIR ROAS (afrouxar meta p/ recuperar entrega)")
+            acao = "DIMINUIR ROAS (afrouxar meta p/ recuperar entrega)"
+            motivos.append("Antes performou bem (ROAS anterior bom)")
 
-        # recomendações “lei” em linguagem executiva
-        if caiu_imp:
-            reasons.append("Ação: aumentar entrega (orçamento/lance/estrutura)")
-        if pd.notna(ctr_prev) and pd.notna(ctr_curr) and ctr_curr < ctr_prev:
-            reasons.append("Ação: preço + cauda longa + imagem")
-        if pd.notna(cvr_prev) and pd.notna(cvr_curr) and cvr_curr < cvr_prev:
-            reasons.append("Ação: copy + gatilhos + oferta/landing")
+        # se não entrou no diminuir ROAS, decide pela “lei” de causa
+        if acao == "Monitorar":
+            if caiu_imp:
+                acao = "Aumentar entrega (orçamento/lance/estrutura)"
+            elif caiu_ctr:
+                acao = "Preço + cauda longa + imagem"
+            elif caiu_cvr:
+                acao = "Copy + gatilhos + oferta/landing"
+            elif caiu_clk:
+                acao = "Revisar oferta/imagem/palavras"
 
-    return sinal, (" | ".join(reasons) if reasons else "")
+    return sinal, (" | ".join(motivos) if motivos else ""), acao
 
 
 # ============================
 # 7) UI
 # ============================
-st.title("Shopee Ads – Campanhas + Loja (Pedidos pagos + TACOS + Insights + Mês x Mês)")
+st.title("Shopee Ads – Campanhas + Loja (TACOS + Oportunidades + Mês x Mês)")
 
 with st.sidebar:
-    st.header("Configuração das regras (geral)")
+    st.header("Configuração das regras")
 
     st.subheader("CVR (taxa de conversão)")
     cvr_ruim_max_pct = st.number_input("CVR ruim (até %) → 🔴", value=1.5, step=0.1)
@@ -402,18 +408,18 @@ with st.sidebar:
     tacos_ideal_pct = st.number_input("TACOS ideal (%)", value=8.0, step=0.5)
     tacos_limite_pct = st.number_input("TACOS limite (%)", value=10.0, step=0.5)
 
-    st.subheader("Regra extra (MoM): diminuir ROAS")
+    st.subheader("MoM: regra 'diminuir ROAS'")
     roas_bom = st.number_input("ROAS anterior considerado 'bom'", value=4.0, step=0.1)
 
     st.divider()
-    st.subheader("Outros filtros (Ads)")
+    st.subheader("Filtros")
     min_clicks_eval = st.number_input("Mín. cliques p/ avaliar CVR", value=30, step=5)
     min_spend_no_conv = st.number_input("Gasto mínimo p/ alerta sem conversão (R$)", value=50.0, step=10.0)
     low_impressions_threshold = st.number_input("Impressões baixas (oportunidade)", value=300, step=50)
     dominance_spend_share = st.slider("Dominância de gasto no grupo (%)", min_value=50, max_value=95, value=70)
 
     st.divider()
-    st.subheader("Insights (Loja)")
+    st.subheader("Oportunidades (Loja)")
     min_revenue_candidate = st.number_input("Faturamento mínimo p/ sugerir Ads (R$)", value=1000.0, step=100.0)
     drop_alert_pct = st.number_input("Queda de faturamento p/ alerta (%)", value=20.0, step=5.0)
 
@@ -474,31 +480,32 @@ def semaforo_ideal_limite(x: float, ideal: float, limite: float) -> tuple[str, s
 
 
 def action_for_row_new(ctr: float, cvr: float, imps: float, *, low_imp_threshold: int) -> tuple[str, str]:
+    """
+    Retorna (bolinha, o_que_fazer) por anúncio/produto.
+    """
     ctr_cls = classify_ctr(ctr) if pd.notna(ctr) else "n/a"
     cvr_cls = classify_cvr(cvr) if pd.notna(cvr) else "n/a"
     worst = worst_class(ctr_cls, cvr_cls)
     bolinha = dot_from_class(worst)
 
-    reasons = []
+    actions = []
     if ctr_cls == "vermelho":
-        reasons.append("CTR 🔴 → ajustar preço + cauda longa + imagem (urgente)")
+        actions.append("CTR ruim → preço + cauda longa + imagem")
     elif ctr_cls == "amarelo":
-        reasons.append("CTR 🟡 → otimizar preço + cauda longa + imagem")
+        actions.append("CTR ok → otimizar preço + cauda longa + imagem")
 
     if cvr_cls == "vermelho":
-        reasons.append("CVR 🔴 → ajustar copy + gatilhos + oferta/landing (urgente)")
+        actions.append("CVR ruim → copy + gatilhos + oferta/landing")
     elif cvr_cls == "amarelo":
-        reasons.append("CVR 🟡 → melhorar copy + gatilhos + oferta/landing")
+        actions.append("CVR médio → melhorar copy + gatilhos")
 
     if pd.notna(imps) and imps <= low_imp_threshold:
-        if ctr_cls == "verde" and cvr_cls in {"verde", "amarelo"}:
-            reasons.append("Pouca impressão → criar/mover para campanha dedicada (orçamento/entrega)")
-        else:
-            reasons.append("Pouca impressão → pode estar travado por orçamento do grupo (considerar mover/separar)")
+        actions.append("Pouca impressão → mover/criar campanha dedicada (orçamento/entrega)")
 
-    if not reasons:
-        reasons.append("Ok → manter e monitorar")
-    return bolinha, " | ".join(reasons)
+    if not actions:
+        actions.append("Ok → manter e monitorar")
+
+    return bolinha, " | ".join(actions)
 
 
 def action_for_store_row(ctr: float, cvr: float, imps: float, *,
@@ -518,19 +525,18 @@ def action_for_store_row(ctr: float, cvr: float, imps: float, *,
 
 st.markdown(
     """
-**Como funciona**
-- Vendas (loja): usa **(pedido pago)** + **Vendas (BRL)**.
-- Ads: usa CSV(s) de **Dados do Grupo de Anúncios**.
-- Linha **sem ID do produto** = **TOTAL da campanha**. Linhas com ID = **anúncios/produtos**.
-- **TACOS** aparece só no **KPI geral do Ads** e no **nível de campanha**.
-- **Mês x mês (Ads)**: sinal primário = **GMV caiu**. Se no período anterior performou bem e caiu agora → **DIMINUIR ROAS**.
+**Resumo**
+- Loja: usa **Pedidos pagos** + coluna **Vendas (BRL)**.
+- Ads: CSV(s) **Dados do grupo de anúncios**.
+- Linha **sem ID do produto** = **TOTAL da campanha** (mesma visualização do seu print).
+- Tabs incluem: **Campanhas**, **Oportunidades**, **Mês x mês** (Campanhas e Anúncios), e **Produtos da Loja mês x mês**.
 """
 )
 
 # ============================
 # 8) Upload Ads - mês analisado e mês anterior
 # ============================
-st.header("Ads – Upload (mês analisado e mês anterior)")
+st.header("Uploads – Ads (mês analisado + mês anterior)")
 
 c_ads1, c_ads2 = st.columns(2)
 with c_ads1:
@@ -606,12 +612,15 @@ else:
 id_col = "ID do produto" if "ID do produto" in df_all.columns else None
 name_col = "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in df_all.columns else None
 
+if id_col is None:
+    st.error("Não encontrei a coluna 'ID do produto' no CSV. Sem isso não dá para separar TOTAL (campanha) de anúncios.")
+
 
 # ============================
 # 9) Upload Vendas (Loja) - producttraffic (mês atual e anterior)
 # ============================
 st.divider()
-st.header("Loja (Pedidos pagos) – mês anterior x mês analisado")
+st.header("Uploads – Loja (Pedidos pagos) (mês anterior + mês analisado)")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -631,26 +640,20 @@ if sales_curr_file is not None:
     df_sales_curr, sheet_curr = read_sales_producttraffic_paid(sales_curr_file)
 
 # ============================
-# 10) KPIs TOP: faturamento anterior | faturamento analisado | diferença
+# 10) KPI Loja (topo)
 # ============================
 faturamento_anterior = None
 faturamento_atual = None
 
-if df_sales_prev is not None:
-    if "Vendas (BRL)" not in df_sales_prev.columns:
-        st.error("Na planilha do mês anterior não encontrei a coluna EXATA: 'Vendas (BRL)'.")
-    else:
-        faturamento_anterior = float(np.nansum(numeric_series_from(df_sales_prev, "Vendas (BRL)")))
+if df_sales_prev is not None and "Vendas (BRL)" in df_sales_prev.columns:
+    faturamento_anterior = float(np.nansum(numeric_series_from(df_sales_prev, "Vendas (BRL)")))
 
-if df_sales_curr is not None:
-    if "Vendas (BRL)" not in df_sales_curr.columns:
-        st.error("Na planilha do mês analisado não encontrei a coluna EXATA: 'Vendas (BRL)'.")
-    else:
-        faturamento_atual = float(np.nansum(numeric_series_from(df_sales_curr, "Vendas (BRL)")))
+if df_sales_curr is not None and "Vendas (BRL)" in df_sales_curr.columns:
+    faturamento_atual = float(np.nansum(numeric_series_from(df_sales_curr, "Vendas (BRL)")))
 
 kA, kB, kC = st.columns(3)
-kA.metric("Faturamento (mês anterior) – pedidos pagos", fmt_brl(faturamento_anterior) if faturamento_anterior is not None else "—")
-kB.metric("Faturamento (mês analisado) – pedidos pagos", fmt_brl(faturamento_atual) if faturamento_atual is not None else "—")
+kA.metric("Loja – Faturamento mês anterior (pagos)", fmt_brl(faturamento_anterior) if faturamento_anterior is not None else "—")
+kB.metric("Loja – Faturamento mês analisado (pagos)", fmt_brl(faturamento_atual) if faturamento_atual is not None else "—")
 
 diff_txt = "—"
 if faturamento_anterior is not None and faturamento_anterior > 0 and faturamento_atual is not None:
@@ -659,7 +662,7 @@ if faturamento_anterior is not None and faturamento_anterior > 0 and faturamento
 kC.metric("Diferença (R$ e %)", diff_txt)
 
 if sheet_prev or sheet_curr:
-    st.caption(f"Aba fixa usada (pedido pago) — anterior: **{sheet_prev or '—'}** | analisado: **{sheet_curr or '—'}**")
+    st.caption(f"ABA usada: anterior **{sheet_prev or '—'}** | analisado **{sheet_curr or '—'}** (sempre 'Pedido pago')")
 
 # ============================
 # 11) KPI ADS (mês analisado): gasto | gmv | ACOS | ROAS | TACOS
@@ -683,40 +686,471 @@ acos_total = (ads_spend_total / ads_gmv_total) if (pd.notna(ads_spend_total) and
 roas_total = (ads_gmv_total / ads_spend_total) if (pd.notna(ads_spend_total) and ads_spend_total > 0 and pd.notna(ads_gmv_total)) else np.nan
 tacos_total = (ads_spend_total / faturamento_atual) if (pd.notna(ads_spend_total) and faturamento_atual is not None and faturamento_atual > 0) else np.nan
 
-st.subheader("Ads (mês analisado) – KPIs")
+st.subheader("Ads – KPIs (mês analisado)")
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Gasto Ads (mês analisado)", fmt_brl(ads_spend_total) if pd.notna(ads_spend_total) else "—")
-k2.metric("GMV Ads (mês analisado)", fmt_brl(ads_gmv_total) if pd.notna(ads_gmv_total) else "—")
-k3.metric("ACOS (mês analisado)", fmt_pct(acos_total) if pd.notna(acos_total) else "—")
-k4.metric("ROAS (mês analisado)", (str(round(roas_total, 2)).replace(".", ",")) if pd.notna(roas_total) else "—")
-k5.metric("TACOS (mês analisado)", fmt_pct(tacos_total) if pd.notna(tacos_total) else "—")
+k1.metric("Gasto Ads", fmt_brl(ads_spend_total) if pd.notna(ads_spend_total) else "—")
+k2.metric("GMV Ads", fmt_brl(ads_gmv_total) if pd.notna(ads_gmv_total) else "—")
+k3.metric("ACOS", fmt_pct(acos_total) if pd.notna(acos_total) else "—")
+k4.metric("ROAS", (str(round(roas_total, 2)).replace(".", ",")) if pd.notna(roas_total) else "—")
+k5.metric("TACOS", fmt_pct(tacos_total) if pd.notna(tacos_total) else "—")
 
 
 # ============================
-# 12) Produtos (Loja) mês x mês (voltou)
+# 12) Preparos: TOTAL campanha + anúncios
+# ============================
+def split_campaign_total_and_ads(df: pd.DataFrame, id_col_: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    id_clean = df[id_col_].astype(str).str.strip()
+    is_total = id_clean.isin(["", "-", "nan", "None"])
+    camp_total = df[is_total].copy()
+    ads_rows = df[~is_total].copy()
+    ads_rows["prod_key"] = ads_rows[id_col_].astype(str).str.strip().apply(normalize_product_id)
+    return camp_total, ads_rows
+
+
+camp_total_curr, ads_rows_curr = split_campaign_total_and_ads(df_all, id_col)
+camp_total_prev, ads_rows_prev = (split_campaign_total_and_ads(df_prev, id_col) if not df_prev.empty else (pd.DataFrame(), pd.DataFrame()))
+
+# chaves de produto em ads (mês atual)
+ads_keys = set(ads_rows_curr["prod_key"].dropna().astype(str).tolist()) if not ads_rows_curr.empty else set()
+
+
+# ============================
+# 13) Tabs principais
 # ============================
 st.divider()
-st.header("Produtos (Loja) – mês x mês (Pedidos pagos)")
+tabs = st.tabs([
+    "Campanhas (decisão)",
+    "Oportunidades",
+    "Ads mês x mês (Campanhas)",
+    "Ads mês x mês (Anúncios)",
+    "Produtos (Loja) mês x mês",
+])
 
-store_mom_df = None
 
-if df_sales_curr is None:
-    st.info("Suba o Excel do mês analisado para liberar a análise de produtos.")
-else:
-    sales_id_col = find_col(df_sales_curr, exact=["ID do Item"], contains=["id do item"])
-    prod_name_col = find_col(df_sales_curr, exact=["Produto"], contains=["produto"])
-    imp_store_col = find_col(df_sales_curr, exact=["Impressões de Produto"], contains=["impress"])
-    clk_store_col = find_col(df_sales_curr, exact=["Cliques Por Produto"], contains=["clique"])
-    ctr_store_col = find_col(df_sales_curr, exact=["CTR"], contains=["ctr"])
-    cvr_store_col = find_col(df_sales_curr, exact=["Taxa de Conversão de Pedidos"], contains=["taxa de convers", "convers"])
-    ord_store_col = find_col(df_sales_curr, exact=["Pedidos"], contains=["pedido"])
+# ============================
+# Tab 1) Campanhas (decisão) - mês atual
+# ============================
+with tabs[0]:
+    st.subheader("Campanhas – decisão (CVR + ACOS + TACOS)")
 
-    if sales_id_col is None or "Vendas (BRL)" not in df_sales_curr.columns:
-        st.error("Não encontrei 'ID do Item' e/ou 'Vendas (BRL)' na aba de pedidos pagos.")
+    if camp_total_curr.empty:
+        st.warning("Não encontrei linhas TOTAL (sem ID) no mês analisado.")
     else:
+        grp = camp_total_curr.groupby(["Campanha_key", "Campanha"], dropna=False).agg({
+            imp_col: "sum",
+            clk_col: "sum",
+            orders_col: "sum",
+            rev_col: "sum",
+            cost_col: "sum",
+        }).reset_index()
+
+        grp = grp.rename(columns={
+            imp_col: "Impressões",
+            clk_col: "Cliques",
+            orders_col: "Pedidos",
+            rev_col: "GMV",
+            cost_col: "Despesas",
+        })
+
+        grp["CVR"] = np.where(grp["Cliques"].fillna(0) > 0, grp["Pedidos"].fillna(0) / grp["Cliques"].fillna(0), np.nan)
+        grp["ACOS"] = np.where(grp["GMV"].fillna(0) > 0, grp["Despesas"].fillna(0) / grp["GMV"].fillna(0), np.nan)
+        grp["ROAS"] = np.where(grp["Despesas"].fillna(0) > 0, grp["GMV"].fillna(0) / grp["Despesas"].fillna(0), np.nan)
+        grp["TACOS"] = (grp["Despesas"] / faturamento_atual) if (faturamento_atual is not None and faturamento_atual > 0) else np.nan
+
+        grp["CVR_cor"] = grp["CVR"].apply(classify_cvr)
+        acos_ideal = acos_ideal_pct / 100.0
+        acos_limite = acos_limite_pct / 100.0
+        tacos_ideal = tacos_ideal_pct / 100.0
+        tacos_limite = tacos_limite_pct / 100.0
+
+        grp[["ACOS_bolinha", "ACOS_status"]] = grp["ACOS"].apply(lambda v: pd.Series(semaforo_ideal_limite(v, acos_ideal, acos_limite)))
+        grp[["TACOS_bolinha", "TACOS_status"]] = grp["TACOS"].apply(lambda v: pd.Series(semaforo_ideal_limite(v, tacos_ideal, tacos_limite)))
+
+        def decisao_final(row) -> tuple[str, str]:
+            cvr_cls = row["CVR_cor"]
+            acos_st = row["ACOS_status"]
+            tacos_st = row["TACOS_status"]
+
+            if acos_st == "ajustar" or tacos_st == "ajustar":
+                return "🔴", "Ajustar (ACOS/TACOS acima do limite)"
+            if cvr_cls == "vermelho":
+                return "🔴", "Ajustar (CVR ruim)"
+            if cvr_cls == "verde" and acos_st == "ótimo" and tacos_st == "ótimo":
+                return "🟢", "Aumentar orçamento (CVR ótimo + ACOS/TACOS ótimos)"
+            if cvr_cls == "verde" and (acos_st == "monitorar" or tacos_st == "monitorar"):
+                return "🟡", "Monitorar (CVR ótimo, mas ACOS/TACOS pedem atenção)"
+            if cvr_cls == "amarelo" and acos_st == "ótimo" and tacos_st == "ótimo":
+                return "🟡", "Manter (CVR bom)"
+            return "🟡", "Monitorar"
+
+        grp[["Sinal", "O que fazer"]] = grp.apply(lambda r: pd.Series(decisao_final(r)), axis=1)
+
+        disp = grp.copy()
+        disp["GMV"] = disp["GMV"].apply(fmt_brl)
+        disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
+        disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ACOS"] = disp["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["TACOS"] = disp["TACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ROAS"] = disp["ROAS"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
+
+        # ✅ poucos cabeçalhos (só o necessário)
+        cols = [
+            "Sinal",
+            "Campanha",
+            "O que fazer",
+            "GMV",
+            "Despesas",
+            "CVR",
+            "ACOS_bolinha",
+            "ACOS",
+            "TACOS_bolinha",
+            "TACOS",
+            "ROAS",
+        ]
+        st.dataframe(disp[cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
+
+
+# ============================
+# Tab 2) Oportunidades
+# ============================
+with tabs[1]:
+    st.subheader("Oportunidades")
+
+    t1, t2, t3 = st.tabs([
+        "Loja → Candidatos a Ads (fora do Ads)",
+        "Ads → Bons com pouca impressão",
+        "Ads → Gastando sem converter",
+    ])
+
+    # 2.1) Loja candidatos a Ads
+    with t1:
+        if df_sales_curr is None or "Vendas (BRL)" not in df_sales_curr.columns:
+            st.info("Suba o Excel do mês analisado (Pedidos pagos) para liberar candidatos.")
+        else:
+            sales_id_col = find_col(df_sales_curr, exact=["ID do Item"], contains=["id do item"])
+            prod_name_col = find_col(df_sales_curr, exact=["Produto"], contains=["produto"])
+            imp_store_col = find_col(df_sales_curr, exact=["Impressões de Produto"], contains=["impress"])
+            clk_store_col = find_col(df_sales_curr, exact=["Cliques Por Produto"], contains=["clique"])
+            ctr_store_col = find_col(df_sales_curr, exact=["CTR"], contains=["ctr"])
+            cvr_store_col = find_col(df_sales_curr, exact=["Taxa de Conversão de Pedidos"], contains=["taxa de convers", "convers"])
+            ord_store_col = find_col(df_sales_curr, exact=["Pedidos"], contains=["pedido"])
+
+            if sales_id_col is None:
+                st.warning("Não encontrei 'ID do Item' na aba de pedidos pagos.")
+            else:
+                s = df_sales_curr.copy()
+                s["prod_key"] = s[sales_id_col].astype(str).str.strip().apply(normalize_product_id)
+                s["Produto"] = s[prod_name_col].astype(str).str.strip() if prod_name_col else ""
+                s["Faturamento"] = numeric_series_from(s, "Vendas (BRL)")
+                s["Impressões"] = numeric_series_from(s, imp_store_col) if imp_store_col else np.nan
+                s["Cliques"] = numeric_series_from(s, clk_store_col) if clk_store_col else np.nan
+                s["CTR"] = s[ctr_store_col].apply(parse_percent) if ctr_store_col else np.where(s["Impressões"].fillna(0) > 0, s["Cliques"].fillna(0) / s["Impressões"].fillna(0), np.nan)
+                s["CVR"] = s[cvr_store_col].apply(parse_percent) if cvr_store_col else np.nan
+                s["Pedidos"] = numeric_series_from(s, ord_store_col) if ord_store_col else np.nan
+
+                agg = s.groupby(["prod_key"], dropna=False).agg({
+                    "Produto": "first",
+                    "Faturamento": "sum",
+                    "Impressões": "sum",
+                    "Cliques": "sum",
+                    "CTR": "mean",
+                    "CVR": "mean",
+                    "Pedidos": "sum",
+                }).reset_index()
+
+                # fora do Ads + com faturamento mínimo
+                cand = agg[~agg["prod_key"].astype(str).isin(ads_keys)].copy()
+                cand = cand[cand["Faturamento"] >= float(min_revenue_candidate)].copy()
+
+                if cand.empty:
+                    st.info("Nenhum candidato (fora do Ads + faturamento mínimo).")
+                else:
+                    cand["Sinal"] = ""
+                    cand["O que fazer"] = ""
+                    for i, r in cand.iterrows():
+                        sinal, acao = action_for_store_row(
+                            r.get("CTR", np.nan),
+                            r.get("CVR", np.nan),
+                            r.get("Impressões", np.nan),
+                            low_imp_threshold=int(low_impressions_threshold),
+                            not_in_ads=True,
+                            revenue=float(r.get("Faturamento", 0.0)) if pd.notna(r.get("Faturamento", np.nan)) else None,
+                        )
+                        cand.at[i, "Sinal"] = sinal
+                        cand.at[i, "O que fazer"] = acao
+
+                    disp = cand.copy()
+                    disp["Faturamento"] = disp["Faturamento"].apply(fmt_brl)
+                    disp["Impressões"] = disp["Impressões"].apply(fmt_int)
+                    disp["Cliques"] = disp["Cliques"].apply(fmt_int)
+                    disp["Pedidos"] = disp["Pedidos"].apply(fmt_int)
+                    disp["CTR"] = disp["CTR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+                    disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+
+                    cols = ["Sinal", "prod_key", "Produto", "Faturamento", "Pedidos", "Impressões", "Cliques", "CTR", "CVR", "O que fazer"]
+                    st.dataframe(disp[cols].sort_values(by="Faturamento", ascending=False), use_container_width=True, hide_index=True)
+
+    # 2.2) Ads bons com pouca impressão (mês atual)
+    with t2:
+        if ads_rows_curr.empty:
+            st.info("Não há linhas de anúncios (somente TOTAL).")
+        else:
+            df = ads_rows_curr.copy()
+            df["Impressões"] = pd.to_numeric(df[imp_col], errors="coerce") if imp_col else np.nan
+            df["Cliques"] = pd.to_numeric(df[clk_col], errors="coerce") if clk_col else np.nan
+            df["CTR"] = pd.to_numeric(df["ctr_calc"], errors="coerce")
+            df["CVR"] = pd.to_numeric(df["cvr_calc"], errors="coerce")
+            df["GMV"] = pd.to_numeric(df[rev_col], errors="coerce") if rev_col else np.nan
+            df["Despesas"] = pd.to_numeric(df[cost_col], errors="coerce") if cost_col else np.nan
+            df["ACOS"] = np.where(df["GMV"].fillna(0) > 0, df["Despesas"].fillna(0) / df["GMV"].fillna(0), np.nan)
+
+            # oportunidade: pouca impressão mas CTR/CVR bons
+            good = df[
+                (df["Impressões"].fillna(0) <= int(low_impressions_threshold))
+                & (
+                    (df["CTR"].fillna(0) >= (ctr_bom_min_pct / 100.0))
+                    | (df["CVR"].fillna(0) >= (cvr_bom_min_pct / 100.0))
+                )
+            ].copy()
+
+            if good.empty:
+                st.info("Nenhuma oportunidade no critério (boa performance + baixa impressão).")
+            else:
+                good["Sinal"] = ""
+                good["O que fazer"] = ""
+                for i, r in good.iterrows():
+                    sinal, acao = action_for_row_new(r.get("CTR", np.nan), r.get("CVR", np.nan), r.get("Impressões", np.nan), low_imp_threshold=int(low_impressions_threshold))
+                    good.at[i, "Sinal"] = sinal
+                    good.at[i, "O que fazer"] = acao
+
+                disp = good.copy()
+                if name_col and name_col in disp.columns:
+                    disp["Produto/Anúncio"] = disp[name_col].astype(str)
+                else:
+                    disp["Produto/Anúncio"] = ""
+                disp["ID"] = disp["prod_key"].astype(str)
+
+                disp["Impressões"] = disp["Impressões"].apply(fmt_int)
+                disp["Cliques"] = disp["Cliques"].apply(fmt_int)
+                disp["CTR"] = disp["CTR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+                disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+                disp["GMV"] = disp["GMV"].apply(fmt_brl)
+                disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
+                disp["ACOS"] = disp["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+
+                cols = ["Sinal", "Campanha", "Produto/Anúncio", "ID", "Impressões", "Cliques", "CTR", "CVR", "GMV", "Despesas", "ACOS", "O que fazer"]
+                st.dataframe(disp[cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
+
+    # 2.3) Gastando sem converter (mês atual)
+    with t3:
+        if ads_rows_curr.empty:
+            st.info("Não há linhas de anúncios (somente TOTAL).")
+        else:
+            df = ads_rows_curr.copy()
+            df["Cliques"] = pd.to_numeric(df[clk_col], errors="coerce") if clk_col else np.nan
+            df["Pedidos"] = pd.to_numeric(df[orders_col], errors="coerce") if orders_col else np.nan
+            df["Despesas"] = pd.to_numeric(df[cost_col], errors="coerce") if cost_col else np.nan
+            df["Impressões"] = pd.to_numeric(df[imp_col], errors="coerce") if imp_col else np.nan
+            df["CTR"] = pd.to_numeric(df["ctr_calc"], errors="coerce")
+            df["CVR"] = pd.to_numeric(df["cvr_calc"], errors="coerce")
+
+            wasting = df[
+                (df["Pedidos"].fillna(0) == 0)
+                & (
+                    (df["Cliques"].fillna(0) >= float(min_clicks_eval))
+                    | (df["Despesas"].fillna(0) >= float(min_spend_no_conv))
+                )
+            ].copy()
+
+            if wasting.empty:
+                st.info("Nenhum item gastando sem converter no critério.")
+            else:
+                wasting["Sinal"] = "🔴"
+                wasting["O que fazer"] = "Pausar/remover (gastando sem converter)"
+
+                disp = wasting.copy()
+                disp["Produto/Anúncio"] = disp[name_col].astype(str) if (name_col and name_col in disp.columns) else ""
+                disp["ID"] = disp["prod_key"].astype(str)
+
+                disp["Impressões"] = disp["Impressões"].apply(fmt_int)
+                disp["Cliques"] = disp["Cliques"].apply(fmt_int)
+                disp["CTR"] = disp["CTR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+                disp["Pedidos"] = disp["Pedidos"].apply(fmt_int)
+                disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+                disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
+
+                cols = ["Sinal", "Campanha", "Produto/Anúncio", "ID", "Impressões", "Cliques", "CTR", "Pedidos", "CVR", "Despesas", "O que fazer"]
+                st.dataframe(disp[cols].sort_values(by="Despesas", ascending=False), use_container_width=True, hide_index=True)
+
+
+# ============================
+# Tab 3) Ads mês x mês – Campanhas (poucos cabeçalhos + o que fazer)
+# ============================
+with tabs[2]:
+    st.subheader("Ads mês x mês – Campanhas")
+
+    if df_prev.empty or camp_total_prev.empty:
+        st.info("Suba os CSVs do mês anterior para comparar campanhas.")
+    else:
+        def campaign_totals(df_tot: pd.DataFrame, imp_, clk_, ord_, gmv_, spend_, faturamento_total: float | None) -> pd.DataFrame:
+            g = df_tot.groupby(["Campanha_key", "Campanha"], dropna=False).agg({
+                imp_: "sum",
+                clk_: "sum",
+                ord_: "sum",
+                gmv_: "sum",
+                spend_: "sum",
+            }).reset_index()
+
+            g = g.rename(columns={imp_: "Impressões", clk_: "Cliques", ord_: "Pedidos", gmv_: "GMV", spend_: "Despesas"})
+            g["CTR"] = np.where(g["Impressões"].fillna(0) > 0, g["Cliques"].fillna(0) / g["Impressões"].fillna(0), np.nan)
+            g["CVR"] = np.where(g["Cliques"].fillna(0) > 0, g["Pedidos"].fillna(0) / g["Cliques"].fillna(0), np.nan)
+            g["ACOS"] = np.where(g["GMV"].fillna(0) > 0, g["Despesas"].fillna(0) / g["GMV"].fillna(0), np.nan)
+            g["ROAS"] = np.where(g["Despesas"].fillna(0) > 0, g["GMV"].fillna(0) / g["Despesas"].fillna(0), np.nan)
+            g["TACOS"] = (g["Despesas"] / faturamento_total) if (faturamento_total is not None and faturamento_total > 0) else np.nan
+            return g
+
+        curr_camp = campaign_totals(camp_total_curr, imp_col, clk_col, orders_col, rev_col, cost_col, faturamento_atual)
+        prev_camp = campaign_totals(camp_total_prev, imp_col_prev or imp_col, clk_col_prev or clk_col, orders_col_prev or orders_col, rev_col_prev or rev_col, cost_col_prev or cost_col, faturamento_anterior)
+
+        mom = curr_camp.merge(prev_camp, on="Campanha_key", how="outer", suffixes=("_curr", "_prev"))
+        mom["Campanha"] = mom["Campanha_curr"].fillna(mom["Campanha_prev"])
+
+        mom["Δ_GMV_%"] = np.where(mom["GMV_prev"].fillna(0) > 0, (mom["GMV_curr"].fillna(0) / mom["GMV_prev"].fillna(0)) - 1, np.nan)
+
+        mom["Sinal"] = ""
+        mom["Motivos"] = ""
+        mom["O que fazer"] = ""
+
+        for i, r in mom.iterrows():
+            sinal, motivos, acao = mom_signal_reasons_action_ads(
+                r.get("GMV_prev", np.nan), r.get("GMV_curr", np.nan),
+                r.get("Impressões_prev", np.nan), r.get("Impressões_curr", np.nan),
+                r.get("Cliques_prev", np.nan), r.get("Cliques_curr", np.nan),
+                r.get("CTR_prev", np.nan), r.get("CTR_curr", np.nan),
+                r.get("CVR_prev", np.nan), r.get("CVR_curr", np.nan),
+                r.get("ROAS_prev", np.nan), r.get("ROAS_curr", np.nan),
+                float(roas_bom),
+            )
+            mom.at[i, "Sinal"] = sinal
+            mom.at[i, "Motivos"] = motivos
+            mom.at[i, "O que fazer"] = acao
+
+        disp = mom.copy()
+        disp["GMV ant"] = disp["GMV_prev"].apply(fmt_brl)
+        disp["GMV atual"] = disp["GMV_curr"].apply(fmt_brl)
+        disp["Δ GMV %"] = disp["Δ_GMV_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
+
+        disp["Gasto atual"] = disp["Despesas_curr"].apply(fmt_brl)
+        disp["CVR atual"] = disp["CVR_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ACOS atual"] = disp["ACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["TACOS atual"] = disp["TACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ROAS atual"] = disp["ROAS_curr"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
+
+        cols = ["Sinal", "Campanha", "GMV ant", "GMV atual", "Δ GMV %", "Gasto atual", "CVR atual", "ACOS atual", "TACOS atual", "ROAS atual", "O que fazer", "Motivos"]
+        st.dataframe(disp[cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
+
+
+# ============================
+# Tab 4) Ads mês x mês – Anúncios (poucos cabeçalhos 'necessários' + o que fazer)
+# ============================
+with tabs[3]:
+    st.subheader("Ads mês x mês – Anúncios/Produtos")
+
+    if df_prev.empty or ads_rows_prev.empty:
+        st.info("Suba os CSVs do mês anterior para comparar anúncios.")
+    else:
+        def agg_ads(df: pd.DataFrame, imp_, clk_, ord_, gmv_, spend_) -> pd.DataFrame:
+            g = df.groupby(["Campanha_key", "Campanha", "prod_key"], dropna=False).agg({
+                imp_: "sum",
+                clk_: "sum",
+                ord_: "sum",
+                gmv_: "sum",
+                spend_: "sum",
+            }).reset_index()
+
+            g = g.rename(columns={imp_: "Impressões", clk_: "Cliques", ord_: "Pedidos", gmv_: "GMV", spend_: "Despesas"})
+            g["CTR"] = np.where(g["Impressões"].fillna(0) > 0, g["Cliques"].fillna(0) / g["Impressões"].fillna(0), np.nan)
+            g["CVR"] = np.where(g["Cliques"].fillna(0) > 0, g["Pedidos"].fillna(0) / g["Cliques"].fillna(0), np.nan)
+            g["ACOS"] = np.where(g["GMV"].fillna(0) > 0, g["Despesas"].fillna(0) / g["GMV"].fillna(0), np.nan)
+            g["ROAS"] = np.where(g["Despesas"].fillna(0) > 0, g["GMV"].fillna(0) / g["Despesas"].fillna(0), np.nan)
+            return g
+
+        curr_a = agg_ads(ads_rows_curr, imp_col, clk_col, orders_col, rev_col, cost_col)
+        prev_a = agg_ads(ads_rows_prev, imp_col_prev or imp_col, clk_col_prev or clk_col, orders_col_prev or orders_col, rev_col_prev or rev_col, cost_col_prev or cost_col)
+
+        mom = curr_a.merge(prev_a, on=["Campanha_key", "prod_key"], how="outer", suffixes=("_curr", "_prev"))
+        mom["Campanha"] = mom["Campanha_curr"].fillna(mom["Campanha_prev"])
+        mom["ID"] = mom["prod_key"].astype(str)
+
+        # nome (do mês atual se existir)
+        if name_col and name_col in ads_rows_curr.columns:
+            nm = ads_rows_curr.groupby(["Campanha_key", "prod_key"])[name_col].first().reset_index().rename(columns={name_col: "Produto/Anúncio"})
+            mom = mom.merge(nm, on=["Campanha_key", "prod_key"], how="left")
+        else:
+            mom["Produto/Anúncio"] = ""
+
+        mom["Δ_GMV_%"] = np.where(mom["GMV_prev"].fillna(0) > 0, (mom["GMV_curr"].fillna(0) / mom["GMV_prev"].fillna(0)) - 1, np.nan)
+
+        mom["Sinal"] = ""
+        mom["Motivos"] = ""
+        mom["O que fazer"] = ""
+
+        for i, r in mom.iterrows():
+            sinal, motivos, acao = mom_signal_reasons_action_ads(
+                r.get("GMV_prev", np.nan), r.get("GMV_curr", np.nan),
+                r.get("Impressões_prev", np.nan), r.get("Impressões_curr", np.nan),
+                r.get("Cliques_prev", np.nan), r.get("Cliques_curr", np.nan),
+                r.get("CTR_prev", np.nan), r.get("CTR_curr", np.nan),
+                r.get("CVR_prev", np.nan), r.get("CVR_curr", np.nan),
+                r.get("ROAS_prev", np.nan), r.get("ROAS_curr", np.nan),
+                float(roas_bom),
+            )
+            # complementa com qualidade mês atual (lei CTR/CVR + baixa impressão)
+            q_sinal, q_acao = action_for_row_new(r.get("CTR_curr", np.nan), r.get("CVR_curr", np.nan), r.get("Impressões_curr", np.nan), low_imp_threshold=int(low_impressions_threshold))
+            acao_final = acao
+            if acao_final == "Monitorar" and q_acao:
+                acao_final = q_acao
+
+            mom.at[i, "Sinal"] = sinal
+            mom.at[i, "Motivos"] = motivos
+            mom.at[i, "O que fazer"] = acao_final
+
+        disp = mom.copy()
+        disp["GMV ant"] = disp["GMV_prev"].apply(fmt_brl)
+        disp["GMV atual"] = disp["GMV_curr"].apply(fmt_brl)
+        disp["Δ GMV %"] = disp["Δ_GMV_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
+
+        disp["Imp atual"] = disp["Impressões_curr"].apply(fmt_int)
+        disp["CTR atual"] = disp["CTR_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["CVR atual"] = disp["CVR_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+
+        disp["ACOS atual"] = disp["ACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ROAS atual"] = disp["ROAS_curr"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
+
+        cols = ["Sinal", "Campanha", "Produto/Anúncio", "ID", "GMV ant", "GMV atual", "Δ GMV %", "Imp atual", "CTR atual", "CVR atual", "ACOS atual", "ROAS atual", "O que fazer", "Motivos"]
+        st.dataframe(disp[cols].sort_values(by=["Campanha", "Produto/Anúncio"]), use_container_width=True, hide_index=True)
+
+
+# ============================
+# Tab 5) Produtos (Loja) mês x mês (queda: sinal primário faturamento + o que fazer)
+# ============================
+with tabs[4]:
+    st.subheader("Produtos (Loja) – mês x mês (sinal primário = faturamento caiu)")
+
+    if df_sales_curr is None or "Vendas (BRL)" not in df_sales_curr.columns:
+        st.info("Suba o Excel do mês analisado (Pedidos pagos).")
+    else:
+        sales_id_col = find_col(df_sales_curr, exact=["ID do Item"], contains=["id do item"])
+        prod_name_col = find_col(df_sales_curr, exact=["Produto"], contains=["produto"])
+        imp_store_col = find_col(df_sales_curr, exact=["Impressões de Produto"], contains=["impress"])
+        clk_store_col = find_col(df_sales_curr, exact=["Cliques Por Produto"], contains=["clique"])
+        ctr_store_col = find_col(df_sales_curr, exact=["CTR"], contains=["ctr"])
+        cvr_store_col = find_col(df_sales_curr, exact=["Taxa de Conversão de Pedidos"], contains=["taxa de convers", "convers"])
+        ord_store_col = find_col(df_sales_curr, exact=["Pedidos"], contains=["pedido"])
+
         s = df_sales_curr.copy()
         s["prod_key"] = s[sales_id_col].astype(str).str.strip().apply(normalize_product_id)
-        s["Produto_nome"] = s[prod_name_col].astype(str).str.strip() if prod_name_col else ""
+        s["Produto"] = s[prod_name_col].astype(str).str.strip() if prod_name_col else ""
         s["rev_curr"] = numeric_series_from(s, "Vendas (BRL)")
         s["imp_curr"] = numeric_series_from(s, imp_store_col) if imp_store_col else np.nan
         s["clk_curr"] = numeric_series_from(s, clk_store_col) if clk_store_col else np.nan
@@ -725,7 +1159,7 @@ else:
         s["ord_curr"] = numeric_series_from(s, ord_store_col) if ord_store_col else np.nan
 
         curr_agg = s.groupby(["prod_key"], dropna=False).agg({
-            "Produto_nome": "first",
+            "Produto": "first",
             "rev_curr": "sum",
             "imp_curr": "sum",
             "clk_curr": "sum",
@@ -744,533 +1178,100 @@ else:
             cvr_prev_col = find_col(sp, exact=["Taxa de Conversão de Pedidos"], contains=["taxa de convers", "convers"])
             ord_prev_col = find_col(sp, exact=["Pedidos"], contains=["pedido"])
 
-            if sales_id_prev is not None:
-                sp["prod_key"] = sp[sales_id_prev].astype(str).str.strip().apply(normalize_product_id)
-                sp["rev_prev"] = numeric_series_from(sp, "Vendas (BRL)")
-                sp["imp_prev"] = numeric_series_from(sp, imp_prev_col) if imp_prev_col else np.nan
-                sp["clk_prev"] = numeric_series_from(sp, clk_prev_col) if clk_prev_col else np.nan
-                sp["ctr_prev"] = sp[ctr_prev_col].apply(parse_percent) if ctr_prev_col else np.where(sp["imp_prev"].fillna(0) > 0, sp["clk_prev"].fillna(0) / sp["imp_prev"].fillna(0), np.nan)
-                sp["cvr_prev"] = sp[cvr_prev_col].apply(parse_percent) if cvr_prev_col else np.nan
-                sp["ord_prev"] = numeric_series_from(sp, ord_prev_col) if ord_prev_col else np.nan
+            sp["prod_key"] = sp[sales_id_prev].astype(str).str.strip().apply(normalize_product_id)
+            sp["rev_prev"] = numeric_series_from(sp, "Vendas (BRL)")
+            sp["imp_prev"] = numeric_series_from(sp, imp_prev_col) if imp_prev_col else np.nan
+            sp["clk_prev"] = numeric_series_from(sp, clk_prev_col) if clk_prev_col else np.nan
+            sp["ctr_prev"] = sp[ctr_prev_col].apply(parse_percent) if ctr_prev_col else np.where(sp["imp_prev"].fillna(0) > 0, sp["clk_prev"].fillna(0) / sp["imp_prev"].fillna(0), np.nan)
+            sp["cvr_prev"] = sp[cvr_prev_col].apply(parse_percent) if cvr_prev_col else np.nan
+            sp["ord_prev"] = numeric_series_from(sp, ord_prev_col) if ord_prev_col else np.nan
 
-                prev_agg = sp.groupby(["prod_key"], dropna=False).agg({
-                    "rev_prev": "sum",
-                    "imp_prev": "sum",
-                    "clk_prev": "sum",
-                    "ctr_prev": "mean",
-                    "cvr_prev": "mean",
-                    "ord_prev": "sum",
-                }).reset_index()
+            prev_agg = sp.groupby(["prod_key"], dropna=False).agg({
+                "rev_prev": "sum",
+                "imp_prev": "sum",
+                "clk_prev": "sum",
+                "ctr_prev": "mean",
+                "cvr_prev": "mean",
+                "ord_prev": "sum",
+            }).reset_index()
 
-                mom = curr_agg.merge(prev_agg, on="prod_key", how="left")
-                for c in ["rev_prev", "imp_prev", "clk_prev", "ctr_prev", "cvr_prev", "ord_prev"]:
-                    mom[c] = pd.to_numeric(mom[c], errors="coerce").fillna(0.0)
-
-                mom["Δ faturamento (R$)"] = mom["rev_curr"] - mom["rev_prev"]
-                mom["Δ faturamento (%)"] = np.where(mom["rev_prev"] > 0, (mom["rev_curr"] / mom["rev_prev"]) - 1, np.nan)
-                mom["Δ impressões (%)"] = np.where(mom["imp_prev"] > 0, (mom["imp_curr"] / mom["imp_prev"]) - 1, np.nan)
-                mom["Δ cliques (%)"] = np.where(mom["clk_prev"] > 0, (mom["clk_curr"] / mom["clk_prev"]) - 1, np.nan)
-                mom["Δ CTR (p.p.)"] = mom["ctr_curr"] - mom["ctr_prev"]
-                mom["Δ CVR (p.p.)"] = mom["cvr_curr"] - mom["cvr_prev"]
-            else:
-                mom = curr_agg.copy()
-                mom["rev_prev"] = np.nan
-                mom["Δ faturamento (R$)"] = np.nan
-                mom["Δ faturamento (%)"] = np.nan
-                mom["Δ impressões (%)"] = np.nan
-                mom["Δ cliques (%)"] = np.nan
-                mom["Δ CTR (p.p.)"] = np.nan
-                mom["Δ CVR (p.p.)"] = np.nan
+            mom = curr_agg.merge(prev_agg, on="prod_key", how="left")
+            for c in ["rev_prev", "imp_prev", "clk_prev", "ctr_prev", "cvr_prev", "ord_prev"]:
+                mom[c] = pd.to_numeric(mom[c], errors="coerce").fillna(0.0)
         else:
             mom = curr_agg.copy()
-            mom["rev_prev"] = np.nan
-            mom["Δ faturamento (R$)"] = np.nan
-            mom["Δ faturamento (%)"] = np.nan
-            mom["Δ impressões (%)"] = np.nan
-            mom["Δ cliques (%)"] = np.nan
-            mom["Δ CTR (p.p.)"] = np.nan
-            mom["Δ CVR (p.p.)"] = np.nan
+            mom["rev_prev"] = 0.0
+            mom["imp_prev"] = 0.0
+            mom["clk_prev"] = 0.0
+            mom["ctr_prev"] = np.nan
+            mom["cvr_prev"] = np.nan
+            mom["ord_prev"] = 0.0
 
-        # sinal primário: faturamento caiu
-        mom["Sinal (faturamento)"] = ""
-        mom["O que caiu junto"] = ""
+        mom["Δ_rev_%"] = np.where(mom["rev_prev"] > 0, (mom["rev_curr"] / mom["rev_prev"]) - 1, np.nan)
+
+        mom["Sinal"] = ""
+        mom["O que fazer"] = ""
+        mom["Motivos"] = ""
+
         for i, r in mom.iterrows():
             prev_rev = r.get("rev_prev", np.nan)
             curr_rev = r.get("rev_curr", np.nan)
+
             if pd.notna(prev_rev) and prev_rev > 0 and pd.notna(curr_rev) and curr_rev < prev_rev:
-                mom.at[i, "Sinal (faturamento)"] = "🔴"
+                mom.at[i, "Sinal"] = "🔴"
                 reasons = []
-                if pd.notna(r.get("Δ impressões (%)")) and r["Δ impressões (%)"] < 0:
-                    reasons.append("Impressões caíram → colocar/fortalecer ADS")
-                if pd.notna(r.get("Δ cliques (%)")) and r["Δ cliques (%)"] < 0:
+                if pd.notna(r.get("imp_prev", np.nan)) and r["imp_prev"] > 0 and pd.notna(r.get("imp_curr", np.nan)) and r["imp_curr"] < r["imp_prev"]:
+                    reasons.append("Impressões caíram → colocar/fortalecer Ads")
+                if pd.notna(r.get("clk_prev", np.nan)) and r["clk_prev"] > 0 and pd.notna(r.get("clk_curr", np.nan)) and r["clk_curr"] < r["clk_prev"]:
                     reasons.append("Cliques caíram → revisar oferta/imagem/palavras")
-                if pd.notna(r.get("Δ CTR (p.p.)")) and r["Δ CTR (p.p.)"] < 0:
+                if pd.notna(r.get("ctr_prev", np.nan)) and pd.notna(r.get("ctr_curr", np.nan)) and r["ctr_curr"] < r["ctr_prev"]:
                     reasons.append("CTR caiu → preço/cauda longa/imagem")
-                if pd.notna(r.get("Δ CVR (p.p.)")) and r["Δ CVR (p.p.)"] < 0:
+                if pd.notna(r.get("cvr_prev", np.nan)) and pd.notna(r.get("cvr_curr", np.nan)) and r["cvr_curr"] < r["cvr_prev"]:
                     reasons.append("CVR caiu → copy/gatilhos")
-                mom.at[i, "O que caiu junto"] = " | ".join(reasons) if reasons else "Queda sem driver claro"
+                mom.at[i, "Motivos"] = " | ".join(reasons) if reasons else "Queda sem driver claro"
+
+                # o que fazer (prático)
+                if any("Impressões caíram" in x for x in reasons):
+                    mom.at[i, "O que fazer"] = "Colocar/fortalecer Ads (recuperar entrega)"
+                elif any("CTR caiu" in x for x in reasons):
+                    mom.at[i, "O que fazer"] = "Preço + cauda longa + imagem"
+                elif any("CVR caiu" in x for x in reasons):
+                    mom.at[i, "O que fazer"] = "Copy + gatilhos + oferta/landing"
+                else:
+                    mom.at[i, "O que fazer"] = "Investigar concorrência/estoque/preço"
+
             elif pd.notna(prev_rev) and prev_rev > 0 and pd.notna(curr_rev) and curr_rev > prev_rev:
-                mom.at[i, "Sinal (faturamento)"] = "🟢"
-                mom.at[i, "O que caiu junto"] = "Cresceu vs mês anterior"
+                mom.at[i, "Sinal"] = "🟢"
+                mom.at[i, "O que fazer"] = "Manter e escalar (se estiver sem Ads, considerar Ads)"
+                mom.at[i, "Motivos"] = "Cresceu vs mês anterior"
             else:
-                mom.at[i, "Sinal (faturamento)"] = "🟡"
-                mom.at[i, "O que caiu junto"] = "Sem base anterior ou estável"
+                mom.at[i, "Sinal"] = "🟡"
+                mom.at[i, "O que fazer"] = "Monitorar"
+                mom.at[i, "Motivos"] = "Sem base anterior"
 
         disp = mom.copy()
-        disp["Faturamento mês anterior"] = disp["rev_prev"].apply(fmt_brl)
-        disp["Faturamento mês analisado"] = disp["rev_curr"].apply(fmt_brl)
-        disp["Variação faturamento (R$)"] = disp["Δ faturamento (R$)"].apply(fmt_brl)
-        disp["Variação faturamento (%)"] = disp["Δ faturamento (%)"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
+        disp["Fat ant"] = disp["rev_prev"].apply(fmt_brl)
+        disp["Fat atual"] = disp["rev_curr"].apply(fmt_brl)
+        disp["Δ Fat %"] = disp["Δ_rev_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
+        disp["Imp atual"] = disp["imp_curr"].apply(fmt_int)
+        disp["CTR atual"] = disp["ctr_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["CVR atual"] = disp["cvr_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
 
-        disp["Impressões (mês)"] = disp["imp_curr"].apply(fmt_int)
-        disp["Cliques (mês)"] = disp["clk_curr"].apply(fmt_int)
-        disp["CTR (mês)"] = disp["ctr_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["CVR (mês)"] = disp["cvr_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Pedidos (mês)"] = disp["ord_curr"].apply(fmt_int)
-
-        disp["Δ impressões (%)"] = disp["Δ impressões (%)"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
-        disp["Δ cliques (%)"] = disp["Δ cliques (%)"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
-        disp["Δ CTR (p.p.)"] = disp["Δ CTR (p.p.)"].apply(lambda v: fmt_pp(v, digits=2) if pd.notna(v) else "")
-        disp["Δ CVR (p.p.)"] = disp["Δ CVR (p.p.)"].apply(lambda v: fmt_pp(v, digits=2) if pd.notna(v) else "")
-
-        show_cols = [
-            "Sinal (faturamento)",
-            "prod_key",
-            "Produto_nome",
-            "Faturamento mês anterior",
-            "Faturamento mês analisado",
-            "Variação faturamento (R$)",
-            "Variação faturamento (%)",
-            "Impressões (mês)",
-            "Cliques (mês)",
-            "CTR (mês)",
-            "CVR (mês)",
-            "Pedidos (mês)",
-            "Δ impressões (%)",
-            "Δ cliques (%)",
-            "Δ CTR (p.p.)",
-            "Δ CVR (p.p.)",
-            "O que caiu junto",
-        ]
-
-        st.dataframe(
-            disp[show_cols].sort_values(by=["Sinal (faturamento)", "Faturamento mês analisado"], ascending=[True, False]),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        store_mom_df = mom.copy()
+        cols = ["Sinal", "prod_key", "Produto", "Fat ant", "Fat atual", "Δ Fat %", "Imp atual", "CTR atual", "CVR atual", "O que fazer", "Motivos"]
+        st.dataframe(disp[cols].sort_values(by=["Sinal", "Fat atual"], ascending=[True, False]), use_container_width=True, hide_index=True)
 
 
 # ============================
-# 13) Tabs ADS (campanhas / MoM campanhas / MoM anúncios)
+# 15) Exportar Excel (tudo que está aparecendo)
 # ============================
 st.divider()
-tabs_top = st.tabs([
-    "Campanhas (decisão)",
-    "Ads mês x mês (Campanhas)",
-    "Ads mês x mês (Anúncios)",
-])
+st.header("Exportar relatório (Excel)")
 
-camp_overview_df = None
-camp_mom_df = None
-ads_mom_df = None
-
-
-# ============================
-# 13.1) Campanhas (decisão) - mês atual
-# ============================
-with tabs_top[0]:
-    st.header("Visão Geral de Campanhas (decisão por CVR + ACOS + TACOS)")
-
-    if id_col is None:
-        st.warning("Não encontrei a coluna 'ID do produto'. Não consigo separar TOTAL vs anúncios.")
-    else:
-        id_clean = df_all[id_col].astype(str).str.strip()
-        is_total = id_clean.isin(["", "-", "nan", "None"])
-        camp_total = df_all[is_total].copy()
-
-        if camp_total.empty:
-            st.warning("Não encontrei linhas TOTAL (sem ID).")
-        else:
-            grp = camp_total.groupby(["Campanha_key", "Campanha"], dropna=False).agg({
-                imp_col: "sum" if imp_col else "sum",
-                clk_col: "sum" if clk_col else "sum",
-                orders_col: "sum" if orders_col else "sum",
-                rev_col: "sum" if rev_col else "sum",
-                cost_col: "sum" if cost_col else "sum",
-            }).reset_index()
-
-            grp = grp.rename(columns={
-                imp_col: "Impressões",
-                clk_col: "Cliques",
-                orders_col: "Pedidos",
-                rev_col: "GMV",
-                cost_col: "Despesas",
-            })
-
-            grp["CVR"] = np.where(grp["Cliques"].fillna(0) > 0, grp["Pedidos"].fillna(0) / grp["Cliques"].fillna(0), np.nan)
-            grp["ACOS"] = np.where(grp["GMV"].fillna(0) > 0, grp["Despesas"].fillna(0) / grp["GMV"].fillna(0), np.nan)
-            grp["ROAS"] = np.where(grp["Despesas"].fillna(0) > 0, grp["GMV"].fillna(0) / grp["Despesas"].fillna(0), np.nan)
-            grp["TACOS"] = (grp["Despesas"] / faturamento_atual) if (faturamento_atual is not None and faturamento_atual > 0) else np.nan
-
-            grp["CVR_cor"] = grp["CVR"].apply(classify_cvr)
-
-            acos_ideal = acos_ideal_pct / 100.0
-            acos_limite = acos_limite_pct / 100.0
-            tacos_ideal = tacos_ideal_pct / 100.0
-            tacos_limite = tacos_limite_pct / 100.0
-
-            grp[["ACOS_bolinha", "ACOS_status"]] = grp["ACOS"].apply(
-                lambda v: pd.Series(semaforo_ideal_limite(v, acos_ideal, acos_limite))
-            )
-            grp[["TACOS_bolinha", "TACOS_status"]] = grp["TACOS"].apply(
-                lambda v: pd.Series(semaforo_ideal_limite(v, tacos_ideal, tacos_limite))
-            )
-
-            def decisao_final(row) -> tuple[str, str]:
-                cvr_cls = row["CVR_cor"]
-                acos_st = row["ACOS_status"]
-                tacos_st = row["TACOS_status"]
-
-                if acos_st == "ajustar" or tacos_st == "ajustar":
-                    return "🔴", "AJUSTAR (ACOS/TACOS acima do limite)"
-                if cvr_cls == "vermelho":
-                    return "🔴", "AJUSTAR (CVR ruim)"
-                if cvr_cls == "verde" and acos_st == "ótimo" and tacos_st == "ótimo":
-                    return "🟢", "AUMENTAR ORÇAMENTO (CVR ótimo + ACOS/TACOS ótimos)"
-                if cvr_cls == "verde" and (acos_st == "monitorar" or tacos_st == "monitorar"):
-                    return "🟡", "MONITORAR (CVR ótimo, mas ACOS/TACOS pedem atenção)"
-                if cvr_cls == "amarelo" and acos_st == "ótimo" and tacos_st == "ótimo":
-                    return "🟡", "MANTER (CVR bom)"
-                return "🟡", "MONITORAR"
-
-            grp[["Sinal", "Decisão"]] = grp.apply(lambda r: pd.Series(decisao_final(r)), axis=1)
-
-            disp = grp.copy()
-            disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-            disp["ACOS"] = disp["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-            disp["TACOS"] = disp["TACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-            disp["ROAS"] = disp["ROAS"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
-
-            cols = [
-                "Sinal",
-                "Campanha",
-                "Decisão",
-                "CVR",
-                "ACOS_bolinha",
-                "ACOS",
-                "ACOS_status",
-                "TACOS_bolinha",
-                "TACOS",
-                "TACOS_status",
-                "ROAS",
-            ]
-            st.dataframe(disp[cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
-            camp_overview_df = grp.copy()
-
-
-# ============================
-# 13.2) Ads mês x mês – Campanhas (GMV sinal + DIMINUIR ROAS)
-# ============================
-with tabs_top[1]:
-    st.header("Ads mês x mês – Campanhas (comparação com mês anterior)")
-    st.caption("Sinal primário = GMV caiu. Se o período anterior performou bem e caiu agora → DIMINUIR ROAS.")
-
-    if df_prev.empty:
-        st.info("Suba os CSVs do **mês anterior** para liberar esta comparação.")
-    elif id_col is None or (id_col not in df_prev.columns):
-        st.warning("Não encontrei 'ID do produto' no mês anterior.")
-    else:
-        id_clean_c = df_all[id_col].astype(str).str.strip()
-        is_total_c = id_clean_c.isin(["", "-", "nan", "None"])
-        curr_tot = df_all[is_total_c].copy()
-
-        id_clean_p = df_prev[id_col].astype(str).str.strip()
-        is_total_p = id_clean_p.isin(["", "-", "nan", "None"])
-        prev_tot = df_prev[is_total_p].copy()
-
-        def campaign_totals(df_tot: pd.DataFrame, imp_, clk_, ord_, gmv_, spend_, faturamento_total: float | None) -> pd.DataFrame:
-            g = df_tot.groupby(["Campanha_key", "Campanha"], dropna=False).agg({
-                imp_: "sum" if imp_ and imp_ in df_tot.columns else "sum",
-                clk_: "sum" if clk_ and clk_ in df_tot.columns else "sum",
-                ord_: "sum" if ord_ and ord_ in df_tot.columns else "sum",
-                gmv_: "sum" if gmv_ and gmv_ in df_tot.columns else "sum",
-                spend_: "sum" if spend_ and spend_ in df_tot.columns else "sum",
-            }).reset_index()
-
-            g = g.rename(columns={
-                imp_: "Impressões",
-                clk_: "Cliques",
-                ord_: "Pedidos",
-                gmv_: "GMV",
-                spend_: "Despesas",
-            })
-
-            g["CTR"] = np.where(g["Impressões"].fillna(0) > 0, g["Cliques"].fillna(0) / g["Impressões"].fillna(0), np.nan)
-            g["CVR"] = np.where(g["Cliques"].fillna(0) > 0, g["Pedidos"].fillna(0) / g["Cliques"].fillna(0), np.nan)
-            g["ACOS"] = np.where(g["GMV"].fillna(0) > 0, g["Despesas"].fillna(0) / g["GMV"].fillna(0), np.nan)
-            g["ROAS"] = np.where(g["Despesas"].fillna(0) > 0, g["GMV"].fillna(0) / g["Despesas"].fillna(0), np.nan)
-            g["TACOS"] = (g["Despesas"] / faturamento_total) if (faturamento_total is not None and faturamento_total > 0) else np.nan
-            return g
-
-        curr_camp = campaign_totals(curr_tot, imp_col, clk_col, orders_col, rev_col, cost_col, faturamento_atual)
-        prev_camp = campaign_totals(prev_tot, imp_col_prev, clk_col_prev, orders_col_prev, rev_col_prev, cost_col_prev, faturamento_anterior)
-
-        mom = curr_camp.merge(prev_camp, on="Campanha_key", how="outer", suffixes=("_curr", "_prev"))
-        mom["Campanha"] = mom["Campanha_curr"].fillna(mom["Campanha_prev"])
-
-        # deltas
-        for base in ["GMV", "Despesas", "Impressões", "Cliques", "Pedidos"]:
-            c = pd.to_numeric(mom[f"{base}_curr"], errors="coerce")
-            p = pd.to_numeric(mom[f"{base}_prev"], errors="coerce")
-            mom[f"Δ_{base}_R$"] = c - p
-            mom[f"Δ_{base}_%"] = np.where(p > 0, (c / p) - 1, np.nan)
-
-        for rate in ["CTR", "CVR", "ACOS", "TACOS"]:
-            c = pd.to_numeric(mom[f"{rate}_curr"], errors="coerce")
-            p = pd.to_numeric(mom[f"{rate}_prev"], errors="coerce")
-            mom[f"Δ_{rate}_pp"] = c - p
-
-        # sinal GMV + razões (inclui DIMINUIR ROAS)
-        mom["Sinal (GMV)"] = ""
-        mom["O que caiu junto"] = ""
-        for i, r in mom.iterrows():
-            sinal, reasons = mom_signal_and_reasons_ads(
-                r.get("GMV_prev", np.nan), r.get("GMV_curr", np.nan),
-                r.get("Impressões_prev", np.nan), r.get("Impressões_curr", np.nan),
-                r.get("Cliques_prev", np.nan), r.get("Cliques_curr", np.nan),
-                r.get("CTR_prev", np.nan), r.get("CTR_curr", np.nan),
-                r.get("CVR_prev", np.nan), r.get("CVR_curr", np.nan),
-                r.get("Pedidos_prev", np.nan), r.get("Pedidos_curr", np.nan),
-                r.get("ROAS_prev", np.nan), r.get("ROAS_curr", np.nan),
-                float(roas_bom),
-            )
-            mom.at[i, "Sinal (GMV)"] = sinal
-            mom.at[i, "O que caiu junto"] = reasons
-
-        # display com cabeçalhos claros
-        disp = mom.copy()
-        disp["GMV mês anterior"] = mom["GMV_prev"].apply(fmt_brl)
-        disp["GMV mês analisado"] = mom["GMV_curr"].apply(fmt_brl)
-        disp["Variação GMV (R$)"] = mom["Δ_GMV_R$"].apply(fmt_brl)
-        disp["Variação GMV (%)"] = mom["Δ_GMV_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
-
-        disp["Gasto Ads mês anterior"] = mom["Despesas_prev"].apply(fmt_brl)
-        disp["Gasto Ads mês analisado"] = mom["Despesas_curr"].apply(fmt_brl)
-        disp["Variação gasto Ads (R$)"] = mom["Δ_Despesas_R$"].apply(fmt_brl)
-        disp["Variação gasto Ads (%)"] = mom["Δ_Despesas_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
-
-        disp["CTR mês anterior"] = mom["CTR_prev"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["CTR mês analisado"] = mom["CTR_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Variação CTR (p.p.)"] = mom["Δ_CTR_pp"].apply(lambda v: fmt_pp(v) if pd.notna(v) else "")
-
-        disp["CVR mês anterior"] = mom["CVR_prev"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["CVR mês analisado"] = mom["CVR_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Variação CVR (p.p.)"] = mom["Δ_CVR_pp"].apply(lambda v: fmt_pp(v) if pd.notna(v) else "")
-
-        disp["ACOS mês anterior"] = mom["ACOS_prev"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["ACOS mês analisado"] = mom["ACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Variação ACOS (p.p.)"] = mom["Δ_ACOS_pp"].apply(lambda v: fmt_pp(v) if pd.notna(v) else "")
-
-        disp["TACOS mês anterior"] = mom["TACOS_prev"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["TACOS mês analisado"] = mom["TACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Variação TACOS (p.p.)"] = mom["Δ_TACOS_pp"].apply(lambda v: fmt_pp(v) if pd.notna(v) else "")
-
-        disp["ROAS mês anterior"] = mom["ROAS_prev"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
-        disp["ROAS mês analisado"] = mom["ROAS_curr"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
-
-        show_cols = [
-            "Sinal (GMV)",
-            "Campanha",
-            "GMV mês anterior", "GMV mês analisado", "Variação GMV (R$)", "Variação GMV (%)",
-            "Gasto Ads mês anterior", "Gasto Ads mês analisado", "Variação gasto Ads (R$)", "Variação gasto Ads (%)",
-            "ROAS mês anterior", "ROAS mês analisado",
-            "CTR mês anterior", "CTR mês analisado", "Variação CTR (p.p.)",
-            "CVR mês anterior", "CVR mês analisado", "Variação CVR (p.p.)",
-            "ACOS mês anterior", "ACOS mês analisado", "Variação ACOS (p.p.)",
-            "TACOS mês anterior", "TACOS mês analisado", "Variação TACOS (p.p.)",
-            "O que caiu junto",
-        ]
-        st.dataframe(disp[show_cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
-        camp_mom_df = mom.copy()
-
-
-# ============================
-# 13.3) Ads mês x mês – Anúncios (GMV sinal + DIMINUIR ROAS)
-# ============================
-with tabs_top[2]:
-    st.header("Ads mês x mês – Anúncios/Produtos (comparação com mês anterior)")
-    st.caption("Sinal primário = GMV caiu. Se o período anterior performou bem e caiu agora → DIMINUIR ROAS.")
-
-    if df_prev.empty:
-        st.info("Suba os CSVs do **mês anterior** para liberar esta comparação.")
-    elif id_col is None or (id_col not in df_prev.columns):
-        st.warning("Não encontrei 'ID do produto' no mês anterior.")
-    else:
-        def extract_ads(df: pd.DataFrame) -> pd.DataFrame:
-            if id_col not in df.columns:
-                return pd.DataFrame()
-            id_clean = df[id_col].astype(str).str.strip()
-            is_total = id_clean.isin(["", "-", "nan", "None"])
-            out = df[~is_total].copy()
-            out["prod_key"] = out[id_col].astype(str).str.strip().apply(normalize_product_id)
-            out["Campanha_key"] = out["Campanha_key"].apply(_to_str)
-            return out
-
-        ads_curr = extract_ads(df_all)
-        ads_prev = extract_ads(df_prev)
-
-        def agg_ads(df: pd.DataFrame, imp_, clk_, ord_, gmv_, spend_) -> pd.DataFrame:
-            g = df.groupby(["Campanha_key", "Campanha", "prod_key"], dropna=False).agg({
-                imp_: "sum" if imp_ and imp_ in df.columns else "sum",
-                clk_: "sum" if clk_ and clk_ in df.columns else "sum",
-                ord_: "sum" if ord_ and ord_ in df.columns else "sum",
-                gmv_: "sum" if gmv_ and gmv_ in df.columns else "sum",
-                spend_: "sum" if spend_ and spend_ in df.columns else "sum",
-            }).reset_index()
-
-            g = g.rename(columns={
-                imp_: "Impressões",
-                clk_: "Cliques",
-                ord_: "Pedidos",
-                gmv_: "GMV",
-                spend_: "Despesas",
-            })
-
-            g["CTR"] = np.where(g["Impressões"].fillna(0) > 0, g["Cliques"].fillna(0) / g["Impressões"].fillna(0), np.nan)
-            g["CVR"] = np.where(g["Cliques"].fillna(0) > 0, g["Pedidos"].fillna(0) / g["Cliques"].fillna(0), np.nan)
-            g["ACOS"] = np.where(g["GMV"].fillna(0) > 0, g["Despesas"].fillna(0) / g["GMV"].fillna(0), np.nan)
-            g["ROAS"] = np.where(g["Despesas"].fillna(0) > 0, g["GMV"].fillna(0) / g["Despesas"].fillna(0), np.nan)
-
-            if name_col and name_col in df.columns:
-                name_map = df.dropna(subset=[name_col]).groupby(["Campanha_key", "prod_key"])[name_col].first().reset_index()
-                g = g.merge(name_map, on=["Campanha_key", "prod_key"], how="left")
-                g = g.rename(columns={name_col: "Produto/Anúncio"})
-            else:
-                g["Produto/Anúncio"] = ""
-
-            return g
-
-        curr_a = agg_ads(ads_curr, imp_col, clk_col, orders_col, rev_col, cost_col)
-        prev_a = agg_ads(ads_prev, imp_col_prev, clk_col_prev, orders_col_prev, rev_col_prev, cost_col_prev)
-
-        mom = curr_a.merge(prev_a, on=["Campanha_key", "prod_key"], how="outer", suffixes=("_curr", "_prev"))
-        mom["Campanha"] = mom["Campanha_curr"].fillna(mom["Campanha_prev"])
-        mom["Produto/Anúncio"] = mom["Produto/Anúncio_curr"].fillna(mom["Produto/Anúncio_prev"])
-        mom["ID do produto"] = mom["prod_key"].astype(str)
-
-        for base in ["GMV", "Despesas", "Impressões", "Cliques", "Pedidos"]:
-            c = pd.to_numeric(mom[f"{base}_curr"], errors="coerce")
-            p = pd.to_numeric(mom[f"{base}_prev"], errors="coerce")
-            mom[f"Δ_{base}_R$"] = c - p
-            mom[f"Δ_{base}_%"] = np.where(p > 0, (c / p) - 1, np.nan)
-
-        for rate in ["CTR", "CVR", "ACOS"]:
-            c = pd.to_numeric(mom[f"{rate}_curr"], errors="coerce")
-            p = pd.to_numeric(mom[f"{rate}_prev"], errors="coerce")
-            mom[f"Δ_{rate}_pp"] = c - p
-
-        # sinal GMV + razões (inclui DIMINUIR ROAS)
-        mom["Sinal (GMV)"] = ""
-        mom["O que caiu junto"] = ""
-        for i, r in mom.iterrows():
-            sinal, reasons = mom_signal_and_reasons_ads(
-                r.get("GMV_prev", np.nan), r.get("GMV_curr", np.nan),
-                r.get("Impressões_prev", np.nan), r.get("Impressões_curr", np.nan),
-                r.get("Cliques_prev", np.nan), r.get("Cliques_curr", np.nan),
-                r.get("CTR_prev", np.nan), r.get("CTR_curr", np.nan),
-                r.get("CVR_prev", np.nan), r.get("CVR_curr", np.nan),
-                r.get("Pedidos_prev", np.nan), r.get("Pedidos_curr", np.nan),
-                r.get("ROAS_prev", np.nan), r.get("ROAS_curr", np.nan),
-                float(roas_bom),
-            )
-            mom.at[i, "Sinal (GMV)"] = sinal
-            mom.at[i, "O que caiu junto"] = reasons
-
-        # qualidade mês atual (para ajuste por CTR/CVR + pouca impressão)
-        mom["Sinal (qualidade mês atual)"] = ""
-        mom["Ajuste recomendado (mês atual)"] = ""
-        for i, r in mom.iterrows():
-            sinal_q, ajuste = action_for_row_new(
-                r.get("CTR_curr", np.nan),
-                r.get("CVR_curr", np.nan),
-                r.get("Impressões_curr", np.nan),
-                low_imp_threshold=int(low_impressions_threshold),
-            )
-            mom.at[i, "Sinal (qualidade mês atual)"] = sinal_q
-            mom.at[i, "Ajuste recomendado (mês atual)"] = ajuste
-
-        disp = mom.copy()
-        disp["GMV mês anterior"] = mom["GMV_prev"].apply(fmt_brl)
-        disp["GMV mês analisado"] = mom["GMV_curr"].apply(fmt_brl)
-        disp["Variação GMV (R$)"] = mom["Δ_GMV_R$"].apply(fmt_brl)
-        disp["Variação GMV (%)"] = mom["Δ_GMV_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
-
-        disp["Gasto Ads mês anterior"] = mom["Despesas_prev"].apply(fmt_brl)
-        disp["Gasto Ads mês analisado"] = mom["Despesas_curr"].apply(fmt_brl)
-        disp["Variação gasto Ads (R$)"] = mom["Δ_Despesas_R$"].apply(fmt_brl)
-        disp["Variação gasto Ads (%)"] = mom["Δ_Despesas_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
-
-        disp["Impressões mês anterior"] = mom["Impressões_prev"].apply(fmt_int)
-        disp["Impressões mês analisado"] = mom["Impressões_curr"].apply(fmt_int)
-        disp["Cliques mês anterior"] = mom["Cliques_prev"].apply(fmt_int)
-        disp["Cliques mês analisado"] = mom["Cliques_curr"].apply(fmt_int)
-
-        disp["CTR mês anterior"] = mom["CTR_prev"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["CTR mês analisado"] = mom["CTR_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Variação CTR (p.p.)"] = mom["Δ_CTR_pp"].apply(lambda v: fmt_pp(v) if pd.notna(v) else "")
-
-        disp["CVR mês anterior"] = mom["CVR_prev"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["CVR mês analisado"] = mom["CVR_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Variação CVR (p.p.)"] = mom["Δ_CVR_pp"].apply(lambda v: fmt_pp(v) if pd.notna(v) else "")
-
-        disp["ACOS mês anterior"] = mom["ACOS_prev"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["ACOS mês analisado"] = mom["ACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["Variação ACOS (p.p.)"] = mom["Δ_ACOS_pp"].apply(lambda v: fmt_pp(v) if pd.notna(v) else "")
-
-        disp["ROAS mês anterior"] = mom["ROAS_prev"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
-        disp["ROAS mês analisado"] = mom["ROAS_curr"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
-
-        show_cols = [
-            "Campanha",
-            "ID do produto",
-            "Produto/Anúncio",
-            "Sinal (GMV)",
-            "GMV mês anterior", "GMV mês analisado", "Variação GMV (R$)", "Variação GMV (%)",
-            "Gasto Ads mês anterior", "Gasto Ads mês analisado", "Variação gasto Ads (R$)", "Variação gasto Ads (%)",
-            "ROAS mês anterior", "ROAS mês analisado",
-            "Impressões mês anterior", "Impressões mês analisado",
-            "Cliques mês anterior", "Cliques mês analisado",
-            "CTR mês anterior", "CTR mês analisado", "Variação CTR (p.p.)",
-            "CVR mês anterior", "CVR mês analisado", "Variação CVR (p.p.)",
-            "ACOS mês anterior", "ACOS mês analisado", "Variação ACOS (p.p.)",
-            "O que caiu junto",
-            "Sinal (qualidade mês atual)",
-            "Ajuste recomendado (mês atual)",
-        ]
-        st.dataframe(disp[show_cols].sort_values(by=["Campanha", "ID do produto"]), use_container_width=True, hide_index=True)
-        ads_mom_df = mom.copy()
-
-
-# ============================
-# 14) Exportar Excel
-# ============================
-st.divider()
-st.header("Exportar (Excel)")
-
-export_tables = {}
-export_tables["ADS_Base_Atual"] = df_all.copy()
+export_tables = {
+    "ADS_Base_Atual": df_all.copy(),
+}
 if not df_prev.empty:
     export_tables["ADS_Base_Anterior"] = df_prev.copy()
-if camp_overview_df is not None and isinstance(camp_overview_df, pd.DataFrame):
-    export_tables["Campanhas_Atual"] = camp_overview_df
-if camp_mom_df is not None and isinstance(camp_mom_df, pd.DataFrame):
-    export_tables["Campanhas_MoM"] = camp_mom_df
-if ads_mom_df is not None and isinstance(ads_mom_df, pd.DataFrame):
-    export_tables["Anuncios_MoM"] = ads_mom_df
-if store_mom_df is not None and isinstance(store_mom_df, pd.DataFrame):
-    export_tables["Produtos_Loja_MoM"] = store_mom_df
 
 xlsx_bytes = make_excel_export(export_tables)
 st.download_button(
