@@ -934,59 +934,155 @@ with tabs[1]:
 
 
 
-    # 2.2) Ads bons com pouca impressão (mês atual)
-    with t2:
-        if ads_rows_curr.empty:
-            st.info("Não há linhas de anúncios (somente TOTAL).")
-        else:
-            df = ads_rows_curr.copy()
-            df["Impressões"] = pd.to_numeric(df[imp_col], errors="coerce") if imp_col else np.nan
-            df["Cliques"] = pd.to_numeric(df[clk_col], errors="coerce") if clk_col else np.nan
-            df["CTR"] = pd.to_numeric(df["ctr_calc"], errors="coerce")
-            df["CVR"] = pd.to_numeric(df["cvr_calc"], errors="coerce")
-            df["GMV"] = pd.to_numeric(df[rev_col], errors="coerce") if rev_col else np.nan
-            df["Despesas"] = pd.to_numeric(df[cost_col], errors="coerce") if cost_col else np.nan
-            df["ACOS"] = np.where(df["GMV"].fillna(0) > 0, df["Despesas"].fillna(0) / df["GMV"].fillna(0), np.nan)
-
-            # oportunidade: pouca impressão mas CTR/CVR bons
-            good = df[
-                (df["Impressões"].fillna(0) <= int(low_impressions_threshold))
-                & (
-                    (df["CTR"].fillna(0) >= (ctr_bom_min_pct / 100.0))
-                    | (df["CVR"].fillna(0) >= (cvr_bom_min_pct / 100.0))
-                )
-            ].copy()
-
-            if good.empty:
-                st.info("Nenhuma oportunidade no critério (boa performance + baixa impressão).")
+        # 2.2) Ads bons com pouca impressão (mês atual)
+        with t2:
+            if ads_rows_curr.empty:
+                st.info("Não há linhas de anúncios (somente TOTAL).")
             else:
-                good["Sinal"] = ""
-                good["O que fazer"] = ""
-                for i, r in good.iterrows():
-                    sinal, acao = action_for_row_new(r.get("CTR", np.nan), r.get("CVR", np.nan), r.get("Impressões", np.nan), low_imp_threshold=int(low_impressions_threshold))
-                    good.at[i, "Sinal"] = sinal
-                    good.at[i, "O que fazer"] = acao
-
-                disp = good.copy()
-                if name_col and name_col in disp.columns:
-                    disp["Produto/Anúncio"] = disp[name_col].astype(str)
+                df = ads_rows_curr.copy()
+        
+                df["Impressões"] = pd.to_numeric(df[imp_col], errors="coerce") if imp_col else np.nan
+                df["Cliques"] = pd.to_numeric(df[clk_col], errors="coerce") if clk_col else np.nan
+                df["CTR"] = pd.to_numeric(df["ctr_calc"], errors="coerce")
+                df["CVR"] = pd.to_numeric(df["cvr_calc"], errors="coerce")
+        
+                df["GMV"] = pd.to_numeric(df[rev_col], errors="coerce") if rev_col else np.nan
+                df["Despesas"] = pd.to_numeric(df[cost_col], errors="coerce") if cost_col else np.nan
+                df["Pedidos"] = pd.to_numeric(df[orders_col], errors="coerce") if orders_col else np.nan
+        
+                # ---------
+                # 1) métricas por campanha (dominância de gasto)
+                # ---------
+                camp_spend = (
+                    df.groupby(["Campanha_key"], dropna=False)["Despesas"]
+                    .sum()
+                    .reset_index()
+                    .rename(columns={"Despesas": "Gasto_campanha"})
+                )
+        
+                # gasto por anúncio dentro da campanha
+                df["Gasto_anuncio"] = df["Despesas"].fillna(0.0)
+        
+                # maior gasto por campanha (top1)
+                top_spend = (
+                    df.groupby(["Campanha_key"], dropna=False)["Gasto_anuncio"]
+                    .max()
+                    .reset_index()
+                    .rename(columns={"Gasto_anuncio": "Top1_gasto"})
+                )
+        
+                df = df.merge(camp_spend, on="Campanha_key", how="left")
+                df = df.merge(top_spend, on="Campanha_key", how="left")
+        
+                df["Share_top1"] = np.where(
+                    df["Gasto_campanha"].fillna(0) > 0,
+                    df["Top1_gasto"].fillna(0) / df["Gasto_campanha"].fillna(0),
+                    np.nan
+                )
+        
+                # campanha é "dominada" quando o top1 consome >= X% do gasto
+                dom_pct = float(dominance_spend_share) / 100.0
+                df["Campanha_dominada"] = df["Share_top1"].fillna(0) >= dom_pct
+        
+                # ---------
+                # 2) critérios do candidato:
+                # - vendeu (Pedidos > 0)
+                # - gastou pouco (abaixo do mediano da campanha ou abaixo de 20% do top1)
+                # - CTR bom + CVR bom
+                # - campanha dominada
+                # ---------
+                # gasto mediano por campanha (pra identificar "baixo" dentro daquela campanha)
+                med_spend = (
+                    df.groupby(["Campanha_key"], dropna=False)["Gasto_anuncio"]
+                    .median()
+                    .reset_index()
+                    .rename(columns={"Gasto_anuncio": "Mediana_gasto"})
+                )
+                df = df.merge(med_spend, on="Campanha_key", how="left")
+        
+                # "gastou pouco" = abaixo da mediana OU <= 20% do top1
+                df["Gasto_baixo"] = (df["Gasto_anuncio"].fillna(0) <= df["Mediana_gasto"].fillna(0)) | (
+                    df["Top1_gasto"].fillna(0) > 0 and (df["Gasto_anuncio"].fillna(0) / df["Top1_gasto"].fillna(0) <= 0.20)
+                )
+        
+                ctr_bom = (ctr_bom_min_pct / 100.0)
+                cvr_bom = (cvr_bom_min_pct / 100.0)
+        
+                cand = df[
+                    (df["Campanha_dominada"] == True)
+                    & (df["Pedidos"].fillna(0) > 0)
+                    & (df["Gasto_baixo"] == True)
+                    & (df["CTR"].fillna(0) >= ctr_bom)
+                    & (df["CVR"].fillna(0) >= cvr_bom)
+                ].copy()
+        
+                if cand.empty:
+                    st.info("Nenhuma oportunidade encontrada (vendeu + CTR/CVR bons + pouco gasto em campanha dominada).")
                 else:
-                    disp["Produto/Anúncio"] = ""
-                disp["ID"] = disp["prod_key"].astype(str)
-
-                disp["Impressões"] = disp["Impressões"].apply(fmt_int)
-                disp["Cliques"] = disp["Cliques"].apply(fmt_int)
-                disp["CTR"] = disp["CTR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-                disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-                disp["GMV"] = disp["GMV"].apply(fmt_brl)
-                disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
-                disp["ACOS"] = disp["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-
-                cols = ["Sinal", "Campanha", "Produto/Anúncio", "ID", "Impressões", "Cliques", "CTR", "CVR", "GMV", "Despesas", "ACOS", "O que fazer"]
-                final_df = disp[cols].sort_values(by="Campanha").copy()
-                st.dataframe(final_df, use_container_width=True, hide_index=True)
-
-                st.session_state["REPORT_TABLES"]["Oportunidades - Ads baixa impressão"] = final_df
+                    # sinal = verde porque é oportunidade clara de escala
+                    cand["Sinal"] = "🟢"
+        
+                    # motivo direto + números
+                    cand["Motivo"] = cand.apply(
+                        lambda r: (
+                            f"Vendeu com pouco gasto numa campanha dominada "
+                            f"(Top1 consome {fmt_pct(r.get('Share_top1', np.nan), digits=1)} do gasto). "
+                            f"CTR {fmt_pct(r.get('CTR', np.nan), digits=2)} | "
+                            f"CVR {fmt_pct(r.get('CVR', np.nan), digits=2)} | "
+                            f"Gasto {fmt_brl(r.get('Gasto_anuncio', 0.0))} | "
+                            f"Pedidos {fmt_int(r.get('Pedidos', 0.0))}"
+                        ),
+                        axis=1
+                    )
+        
+                    # o que fazer objetivo (sem enrolar)
+                    cand["O que fazer"] = "Criar campanha dedicada / separar do anúncio dominante e subir orçamento"
+        
+                    disp = cand.copy()
+                    disp["Produto/Anúncio"] = disp[name_col].astype(str) if (name_col and name_col in disp.columns) else ""
+                    disp["ID"] = disp["prod_key"].astype(str)
+        
+                    disp["Impressões"] = disp["Impressões"].apply(fmt_int)
+                    disp["Cliques"] = disp["Cliques"].apply(fmt_int)
+                    disp["CTR"] = disp["CTR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+                    disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+                    disp["GMV"] = disp["GMV"].apply(fmt_brl)
+                    disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
+                    disp["ACOS"] = np.where(
+                        pd.to_numeric(cand["GMV"], errors="coerce").fillna(0) > 0,
+                        (pd.to_numeric(cand["Despesas"], errors="coerce").fillna(0) / pd.to_numeric(cand["GMV"], errors="coerce").fillna(0)),
+                        np.nan
+                    )
+                    # ACOS formatado
+                    # (disp["ACOS"] aqui é série numpy -> vamos calcular no próprio disp)
+                    # reaplica com base nos valores já numéricos:
+                    disp_acos = np.where(
+                        pd.to_numeric(cand["GMV"], errors="coerce").fillna(0) > 0,
+                        pd.to_numeric(cand["Despesas"], errors="coerce").fillna(0) / pd.to_numeric(cand["GMV"], errors="coerce").fillna(0),
+                        np.nan
+                    )
+                    disp["ACOS"] = pd.Series(disp_acos).apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        
+                    # colunas enxutas (igual seu padrão)
+                    cols = [
+                        "Sinal",
+                        "Campanha",
+                        "Produto/Anúncio",
+                        "ID",
+                        "GMV",
+                        "Despesas",
+                        "ACOS",
+                        "Impressões",
+                        "Cliques",
+                        "CTR",
+                        "CVR",
+                        "O que fazer",
+                        "Motivo",
+                    ]
+                    final_df = disp[cols].sort_values(by=["Campanha", "GMV"], ascending=[True, False]).copy()
+                    st.dataframe(final_df, use_container_width=True, hide_index=True)
+        
+                    st.session_state["REPORT_TABLES"]["Oportunidades - Ads baixa impressão"] = final_df
 
 
     # 2.3) Gastando sem converter (mês atual)
