@@ -7,6 +7,9 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Shopee Ads Auditor (Campanha + Loja)", layout="wide")
+# ✅ MUITO IMPORTANTE (Streamlit): o estado persiste entre reruns
+if "REPORT_TABLES" not in st.session_state:
+    st.session_state["REPORT_TABLES"] = {}
 
 
 # ============================
@@ -811,7 +814,7 @@ with tabs[0]:
         st.dataframe(final_df, use_container_width=True, hide_index=True)
 
         # ✅ salva igual ao app
-        REPORT_TABLES["Campanhas (decisão)"] = final_df
+        st.session_state["REPORT_TABLES"]["Campanhas (decisão)"] = final_df
 
 
 
@@ -896,7 +899,7 @@ with tabs[1]:
                     final_df = disp[cols].sort_values(by="Faturamento", ascending=False).copy()
                     st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-                    REPORT_TABLES["Oportunidades - Loja → Ads"] = final_df
+                    st.session_state["REPORT_TABLES"]["Oportunidades - Loja → Ads"] = final_df
 
 
     # 2.2) Ads bons com pouca impressão (mês atual)
@@ -951,7 +954,7 @@ with tabs[1]:
                 final_df = disp[cols].sort_values(by="Campanha").copy()
                 st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-                REPORT_TABLES["Oportunidades - Ads baixa impressão"] = final_df
+               st.session_state["REPORT_TABLES"]["Oportunidades - Ads baixa impressão"] = final_df
 
 
     # 2.3) Gastando sem converter (mês atual)
@@ -996,7 +999,7 @@ with tabs[1]:
                 final_df = disp[cols].sort_values(by="Despesas", ascending=False).copy()
                 st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-                REPORT_TABLES["Oportunidades - Gastando sem converter"] = final_df
+                st.session_state["REPORT_TABLES"]["Oportunidades - Gastando sem converter"] = final_df
 
 
 
@@ -1067,7 +1070,7 @@ with tabs[2]:
         final_df = disp[cols].sort_values(by="Campanha").copy()
         st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-        REPORT_TABLES["Ads MoM (Campanhas)"] = final_df
+        st.session_state["REPORT_TABLES"]["Ads MoM (Campanhas)"] = final_df
 
 
 # ============================
@@ -1151,7 +1154,7 @@ with tabs[3]:
         final_df = disp[cols].sort_values(by=["Campanha", "Produto/Anúncio"]).copy()
         st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-        REPORT_TABLES["Ads MoM (Anúncios)"] = final_df
+        st.session_state["REPORT_TABLES"]["Ads MoM (Anúncios)"] = final_df
 
 
 # ============================
@@ -1302,7 +1305,7 @@ with tabs[4]:
         final_df = disp[cols].sort_values(by=["Sinal", "Fat atual"], ascending=[True, False]).copy()
         st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-        REPORT_TABLES["Produtos (Loja) MoM"] = final_df
+        st.session_state["REPORT_TABLES"]["Produtos (Loja) MoM"] = final_df
 
 
 # ============================
