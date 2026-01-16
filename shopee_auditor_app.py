@@ -486,18 +486,26 @@ def semaforo_ideal_limite(x: float, ideal: float, limite: float) -> tuple[str, s
 def action_for_row_new(ctr: float, cvr: float, imps: float, *, low_imp_threshold: int) -> tuple[str, str]:
     """
     Retorna (bolinha, o_que_fazer) por anúncio/produto.
+    Regras novas:
+    - Se 0 impressões: verificar estoque/anúncio pausado.
+    - Se CTR estiver ok/ótimo: NÃO mencionar CTR no "O que fazer".
     """
+    # ✅ NOVO: 0 impressões
+    if pd.notna(imps) and float(imps) == 0.0:
+        return "🟡", "0 impressões → verificar estoque / anúncio pausado / sem entrega"
+
     ctr_cls = classify_ctr(ctr) if pd.notna(ctr) else "n/a"
     cvr_cls = classify_cvr(cvr) if pd.notna(cvr) else "n/a"
     worst = worst_class(ctr_cls, cvr_cls)
     bolinha = dot_from_class(worst)
 
     actions = []
+
+    # ✅ CTR: só entra no texto se for RUIM
     if ctr_cls == "vermelho":
         actions.append("CTR ruim → preço + cauda longa + imagem")
-    elif ctr_cls == "amarelo":
-        actions.append("CTR ok → otimizar preço + cauda longa + imagem")
 
+    # CVR mantém como antes
     if cvr_cls == "vermelho":
         actions.append("CVR ruim → copy + gatilhos + oferta/landing")
     elif cvr_cls == "amarelo":
@@ -507,7 +515,7 @@ def action_for_row_new(ctr: float, cvr: float, imps: float, *, low_imp_threshold
         actions.append("Pouca impressão → mover/criar campanha dedicada (orçamento/entrega)")
 
     if not actions:
-        actions.append("Ok → manter e monitorar")
+        actions.append("Monitorar")
 
     return bolinha, " | ".join(actions)
 
@@ -735,86 +743,104 @@ tabs = st.tabs([
 # Tab 1) Campanhas (decisão) - mês atual
 # ============================
 with tabs[0]:
-    st.subheader("Campanhas – decisão (CVR + ACOS + TACOS)")
+    st.subheader("Campanhas – decisão (GMV mês x mês + ACOS + TACOS)")
 
     if camp_total_curr.empty:
         st.warning("Não encontrei linhas TOTAL (sem ID) no mês analisado.")
+    elif df_prev.empty or camp_total_prev.empty:
+        st.info("Suba os CSVs do mês anterior para comparar campanhas e gerar o sinal.")
     else:
-        grp = camp_total_curr.groupby(["Campanha_key", "Campanha"], dropna=False).agg({
-            imp_col: "sum",
-            clk_col: "sum",
-            orders_col: "sum",
-            rev_col: "sum",
-            cost_col: "sum",
-        }).reset_index()
+        def campaign_totals_simple(df_tot: pd.DataFrame, gmv_, spend_, faturamento_total: float | None) -> pd.DataFrame:
+            g = df_tot.groupby(["Campanha_key", "Campanha"], dropna=False).agg({
+                gmv_: "sum",
+                spend_: "sum",
+            }).reset_index()
 
-        grp = grp.rename(columns={
-            imp_col: "Impressões",
-            clk_col: "Cliques",
-            orders_col: "Pedidos",
-            rev_col: "GMV",
-            cost_col: "Despesas",
-        })
+            g = g.rename(columns={gmv_: "GMV", spend_: "Despesas"})
+            g["ACOS"] = np.where(g["GMV"].fillna(0) > 0, g["Despesas"].fillna(0) / g["GMV"].fillna(0), np.nan)
+            g["ROAS"] = np.where(g["Despesas"].fillna(0) > 0, g["GMV"].fillna(0) / g["Despesas"].fillna(0), np.nan)
+            g["TACOS"] = (g["Despesas"] / faturamento_total) if (faturamento_total is not None and faturamento_total > 0) else np.nan
+            return g
 
-        grp["CVR"] = np.where(grp["Cliques"].fillna(0) > 0, grp["Pedidos"].fillna(0) / grp["Cliques"].fillna(0), np.nan)
-        grp["ACOS"] = np.where(grp["GMV"].fillna(0) > 0, grp["Despesas"].fillna(0) / grp["GMV"].fillna(0), np.nan)
-        grp["ROAS"] = np.where(grp["Despesas"].fillna(0) > 0, grp["GMV"].fillna(0) / grp["Despesas"].fillna(0), np.nan)
-        grp["TACOS"] = (grp["Despesas"] / faturamento_atual) if (faturamento_atual is not None and faturamento_atual > 0) else np.nan
+        curr_c = campaign_totals_simple(camp_total_curr, rev_col, cost_col, faturamento_atual)
+        prev_c = campaign_totals_simple(camp_total_prev, (rev_col_prev or rev_col), (cost_col_prev or cost_col), faturamento_anterior)
 
-        grp["CVR_cor"] = grp["CVR"].apply(classify_cvr)
+        dfc = curr_c.merge(prev_c, on="Campanha_key", how="outer", suffixes=("_curr", "_prev"))
+        dfc["Campanha"] = dfc["Campanha_curr"].fillna(dfc["Campanha_prev"])
+
+        dfc["Δ_GMV_%"] = np.where(
+            dfc["GMV_prev"].fillna(0) > 0,
+            (dfc["GMV_curr"].fillna(0) / dfc["GMV_prev"].fillna(0)) - 1,
+            np.nan
+        )
+
         acos_ideal = acos_ideal_pct / 100.0
         acos_limite = acos_limite_pct / 100.0
         tacos_ideal = tacos_ideal_pct / 100.0
         tacos_limite = tacos_limite_pct / 100.0
 
-        grp[["ACOS_bolinha", "ACOS_status"]] = grp["ACOS"].apply(lambda v: pd.Series(semaforo_ideal_limite(v, acos_ideal, acos_limite)))
-        grp[["TACOS_bolinha", "TACOS_status"]] = grp["TACOS"].apply(lambda v: pd.Series(semaforo_ideal_limite(v, tacos_ideal, tacos_limite)))
+        dfc[["ACOS_bolinha", "ACOS_status"]] = dfc["ACOS_curr"].apply(lambda v: pd.Series(semaforo_ideal_limite(v, acos_ideal, acos_limite)))
+        dfc[["TACOS_bolinha", "TACOS_status"]] = dfc["TACOS_curr"].apply(lambda v: pd.Series(semaforo_ideal_limite(v, tacos_ideal, tacos_limite)))
 
-        def decisao_final(row) -> tuple[str, str]:
-            cvr_cls = row["CVR_cor"]
-            acos_st = row["ACOS_status"]
-            tacos_st = row["TACOS_status"]
+        dfc["Sinal"] = ""
+        dfc["O que fazer"] = ""
+        dfc["Motivos"] = ""
+
+        for i, r in dfc.iterrows():
+            gmv_prev = r.get("GMV_prev", np.nan)
+            gmv_curr = r.get("GMV_curr", np.nan)
+
+            caiu_gmv = (pd.notna(gmv_prev) and gmv_prev > 0 and pd.notna(gmv_curr) and gmv_curr < gmv_prev)
+
+            acos_st = r.get("ACOS_status", "n/a")
+            tacos_st = r.get("TACOS_status", "n/a")
+
+            motivos = []
+            if caiu_gmv:
+                sinal = "🔴"
+                motivos.append("GMV caiu vs mês anterior")
+            else:
+                sinal = "🟡"
 
             if acos_st == "ajustar" or tacos_st == "ajustar":
-                return "🔴", "Ajustar (ACOS/TACOS acima do limite)"
-            if cvr_cls == "vermelho":
-                return "🔴", "Ajustar (CVR ruim)"
-            if cvr_cls == "verde" and acos_st == "ótimo" and tacos_st == "ótimo":
-                return "🟢", "Aumentar orçamento (CVR ótimo + ACOS/TACOS ótimos)"
-            if cvr_cls == "verde" and (acos_st == "monitorar" or tacos_st == "monitorar"):
-                return "🟡", "Monitorar (CVR ótimo, mas ACOS/TACOS pedem atenção)"
-            if cvr_cls == "amarelo" and acos_st == "ótimo" and tacos_st == "ótimo":
-                return "🟡", "Manter (CVR bom)"
-            return "🟡", "Monitorar"
+                sinal = "🔴"
+                acao = "Ajustar (ACOS/TACOS acima do limite)"
+                if acos_st == "ajustar":
+                    motivos.append("ACOS acima do limite")
+                if tacos_st == "ajustar":
+                    motivos.append("TACOS acima do limite")
+            elif (acos_st == "ótimo" and tacos_st == "ótimo") and not caiu_gmv:
+                sinal = "🟢"
+                acao = "Aumentar orçamento (ACOS/TACOS ótimos)"
+                motivos.append("Eficiência ótima (ACOS/TACOS)")
+            else:
+                acao = "Monitorar"
 
-        grp[["Sinal", "O que fazer"]] = grp.apply(lambda r: pd.Series(decisao_final(r)), axis=1)
+            dfc.at[i, "Sinal"] = sinal
+            dfc.at[i, "O que fazer"] = acao
+            dfc.at[i, "Motivos"] = " | ".join(motivos)
 
-        disp = grp.copy()
-        disp["GMV"] = disp["GMV"].apply(fmt_brl)
-        disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
-        disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["ACOS"] = disp["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["TACOS"] = disp["TACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-        disp["ROAS"] = disp["ROAS"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
+        disp = dfc.copy()
+        disp["GMV ant"] = disp["GMV_prev"].apply(fmt_brl)
+        disp["GMV atual"] = disp["GMV_curr"].apply(fmt_brl)
+        disp["Δ GMV %"] = disp["Δ_GMV_%"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
+        disp["Gasto atual"] = disp["Despesas_curr"].apply(fmt_brl)
+        disp["ACOS"] = disp["ACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["TACOS"] = disp["TACOS_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ROAS"] = disp["ROAS_curr"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
 
-        # ✅ poucos cabeçalhos (só o necessário)
         cols = [
-            "Sinal",
-            "Campanha",
-            "O que fazer",
-            "GMV",
-            "Despesas",
-            "CVR",
-            "ACOS_bolinha",
-            "ACOS",
-            "TACOS_bolinha",
-            "TACOS",
+            "Sinal", "Campanha",
+            "GMV ant", "GMV atual", "Δ GMV %",
+            "Gasto atual",
+            "ACOS_bolinha", "ACOS",
+            "TACOS_bolinha", "TACOS",
             "ROAS",
+            "O que fazer", "Motivos",
         ]
         final_df = disp[cols].sort_values(by="Campanha").copy()
         st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-        # ✅ salva igual ao app
         st.session_state["REPORT_TABLES"]["Campanhas (decisão)"] = final_df
 
 
@@ -870,37 +896,42 @@ with tabs[1]:
                 # fora do Ads + com faturamento mínimo
                 cand = agg[~agg["prod_key"].astype(str).isin(ads_keys)].copy()
                 cand = cand[cand["Faturamento"] >= float(min_revenue_candidate)].copy()
-
+                
                 if cand.empty:
                     st.info("Nenhum candidato (fora do Ads + faturamento mínimo).")
                 else:
-                    cand["Sinal"] = ""
-                    cand["O que fazer"] = ""
-                    for i, r in cand.iterrows():
-                        sinal, acao = action_for_store_row(
-                            r.get("CTR", np.nan),
-                            r.get("CVR", np.nan),
-                            r.get("Impressões", np.nan),
-                            low_imp_threshold=int(low_impressions_threshold),
-                            not_in_ads=True,
-                            revenue=float(r.get("Faturamento", 0.0)) if pd.notna(r.get("Faturamento", np.nan)) else None,
-                        )
-                        cand.at[i, "Sinal"] = sinal
-                        cand.at[i, "O que fazer"] = acao
-
-                    disp = cand.copy()
+                    out = cand.copy()
+                    out["Sinal"] = "🟢"
+                    out["Motivo"] = ""
+                
+                    for i, r in out.iterrows():
+                        fat = float(r.get("Faturamento", 0.0)) if pd.notna(r.get("Faturamento", np.nan)) else 0.0
+                        pedidos = float(r.get("Pedidos", 0.0)) if pd.notna(r.get("Pedidos", np.nan)) else 0.0
+                        imp = float(r.get("Impressões", 0.0)) if pd.notna(r.get("Impressões", np.nan)) else 0.0
+                        ctr = r.get("CTR", np.nan)
+                        cvr = r.get("CVR", np.nan)
+                
+                        motivos = [f"Fora do Ads e já fatura {fmt_brl(fat)}"]
+                        if pedidos > 0:
+                            motivos.append(f"Pedidos: {int(round(pedidos))}")
+                        if imp > 0:
+                            motivos.append(f"Impressões: {fmt_int(imp)}")
+                        if pd.notna(ctr):
+                            motivos.append(f"CTR: {fmt_pct(ctr)}")
+                        if pd.notna(cvr):
+                            motivos.append(f"CVR: {fmt_pct(cvr)}")
+                
+                        out.at[i, "Motivo"] = " | ".join(motivos)
+                
+                    disp = out.copy()
                     disp["Faturamento"] = disp["Faturamento"].apply(fmt_brl)
-                    disp["Impressões"] = disp["Impressões"].apply(fmt_int)
-                    disp["Cliques"] = disp["Cliques"].apply(fmt_int)
-                    disp["Pedidos"] = disp["Pedidos"].apply(fmt_int)
-                    disp["CTR"] = disp["CTR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-                    disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
-
-                    cols = ["Sinal", "prod_key", "Produto", "Faturamento", "Pedidos", "Impressões", "Cliques", "CTR", "CVR", "O que fazer"]
+                
+                    cols = ["Sinal", "prod_key", "Produto", "Faturamento", "Motivo"]
                     final_df = disp[cols].sort_values(by="Faturamento", ascending=False).copy()
+                
                     st.dataframe(final_df, use_container_width=True, hide_index=True)
-
                     st.session_state["REPORT_TABLES"]["Oportunidades - Loja → Ads"] = final_df
+
 
 
     # 2.2) Ads bons com pouca impressão (mês atual)
