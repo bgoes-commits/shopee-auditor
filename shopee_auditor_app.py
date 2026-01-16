@@ -1218,23 +1218,24 @@ with tabs[4]:
             curr_rev = r.get("rev_curr", np.nan)
 
             # ✅ NOVO: nunca vendeu (anterior=0 e atual=0) MAS tem impressão
-    prev_ord = r.get("ord_prev", 0.0)
-    curr_ord = r.get("ord_curr", 0.0)
-    prev_imp = r.get("imp_prev", 0.0)
-    curr_imp = r.get("imp_curr", 0.0)
+            prev_ord = r.get("ord_prev", 0.0)
+            curr_ord = r.get("ord_curr", 0.0)
+            prev_imp = r.get("imp_prev", 0.0)
+            curr_imp = r.get("imp_curr", 0.0)
 
-    nunca_vendeu = (float(prev_ord) == 0.0) and (float(curr_ord) == 0.0)
-    tem_impressoes = (float(prev_imp) > 0.0) or (float(curr_imp) > 0.0)
+            nunca_vendeu = (float(prev_ord) == 0.0) and (float(curr_ord) == 0.0)
+            tem_impressoes = (float(prev_imp) > 0.0) or (float(curr_imp) > 0.0)
 
-    if nunca_vendeu and tem_impressoes:
-        mom.at[i, "Sinal"] = "🟡"
-        mom.at[i, "O que fazer"] = "Verificar preço + imagem + cauda longa"
-        mom.at[i, "Motivos"] = "Teve impressões, mas não converteu em vendas (nunca vendeu)"
-        continue    
-        
+            if nunca_vendeu and tem_impressoes:
+                mom.at[i, "Sinal"] = "🟡"
+                mom.at[i, "O que fazer"] = "Verificar preço + imagem + cauda longa"
+                mom.at[i, "Motivos"] = "Teve impressões, mas não converteu em vendas (nunca vendeu)"
+                continue
+
             if pd.notna(prev_rev) and prev_rev > 0 and pd.notna(curr_rev) and curr_rev < prev_rev:
                 mom.at[i, "Sinal"] = "🔴"
                 reasons = []
+
                 if pd.notna(r.get("imp_prev", np.nan)) and r["imp_prev"] > 0 and pd.notna(r.get("imp_curr", np.nan)) and r["imp_curr"] < r["imp_prev"]:
                     reasons.append("Impressões caíram → colocar/fortalecer Ads")
                 if pd.notna(r.get("clk_prev", np.nan)) and r["clk_prev"] > 0 and pd.notna(r.get("clk_curr", np.nan)) and r["clk_curr"] < r["clk_prev"]:
@@ -1243,6 +1244,7 @@ with tabs[4]:
                     reasons.append("CTR caiu → preço/cauda longa/imagem")
                 if pd.notna(r.get("cvr_prev", np.nan)) and pd.notna(r.get("cvr_curr", np.nan)) and r["cvr_curr"] < r["cvr_prev"]:
                     reasons.append("CVR caiu → copy/gatilhos")
+
                 mom.at[i, "Motivos"] = " | ".join(reasons) if reasons else "Queda sem driver claro"
 
                 # o que fazer (prático)
@@ -1259,6 +1261,7 @@ with tabs[4]:
                 mom.at[i, "Sinal"] = "🟢"
                 mom.at[i, "O que fazer"] = "Manter e escalar (se estiver sem Ads, considerar Ads)"
                 mom.at[i, "Motivos"] = "Cresceu vs mês anterior"
+
             else:
                 mom.at[i, "Sinal"] = "🟡"
                 mom.at[i, "O que fazer"] = "Monitorar"
