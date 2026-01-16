@@ -1281,3 +1281,129 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
+# ============================
+# 2) HTML interativo (ordenável / pesquisável)
+# ============================
+def df_to_html_table(df: pd.DataFrame, table_id: str) -> str:
+    # escape básico e tabela
+    return df.to_html(index=False, escape=True, table_id=table_id, classes="display compact", border=0)
+
+def make_interactive_html_report(title: str, tables: dict[str, pd.DataFrame]) -> str:
+    # DataTables via CDN (funciona offline? não — precisa internet ao abrir o HTML)
+    # Se quiser offline 100%, eu te passo versão que embute JS/CSS no arquivo.
+    head = f"""
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{title}</title>
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    h1 {{ margin-bottom: 8px; }}
+    h2 {{ margin-top: 28px; }}
+    .kpi {{ display:flex; gap:12px; flex-wrap:wrap; margin: 12px 0 18px; }}
+    .card {{ border:1px solid #ddd; border-radius:12px; padding:12px 14px; min-width:180px; }}
+    .muted {{ color:#666; font-size: 12px; }}
+    table.dataTable {{ width: 100% !important; }}
+  </style>
+</head>
+<body>
+<h1>{title}</h1>
+<p class="muted">Relatório exportado do app Shopee Auditor.</p>
+"""
+    body = ""
+    for i, (name, df) in enumerate(tables.items(), start=1):
+        tid = f"tbl_{i}"
+        body += f"<h2>{name}</h2>\n"
+        body += df_to_html_table(df, tid)
+        body += "\n"
+
+    tail = """
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+<script>
+  $(document).ready(function(){
+    $('table.display').DataTable({
+      pageLength: 25,
+      lengthMenu: [10, 25, 50, 100],
+      order: [],
+      language: {
+        search: "Buscar:",
+        lengthMenu: "Mostrar _MENU_ linhas",
+        info: "Mostrando _START_ a _END_ de _TOTAL_",
+        paginate: { previous: "Anterior", next: "Próximo" }
+      }
+    });
+  });
+</script>
+</body>
+</html>
+"""
+    return head + body + tail
+
+html_report = make_interactive_html_report("Relatório Shopee Auditor", tables_for_report)
+st.download_button(
+    "Baixar HTML interativo (ordenar / filtrar / buscar)",
+    data=html_report.encode("utf-8"),
+    file_name="relatorio_shopee_interativo.html",
+    mime="text/html",
+    use_container_width=True,
+)
+
+st.caption("Obs: HTML interativo usa biblioteca via internet (CDN). Se quiser 100% offline, eu te mando a versão embutida.")
+# ============================
+# 3) PDF (bonito, mas estático)
+# ============================
+def make_pdf_simple(title: str, tables: dict[str, pd.DataFrame]) -> bytes:
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import cm
+
+    bio = BytesIO()
+    c = canvas.Canvas(bio, pagesize=landscape(A4))
+    width, height = landscape(A4)
+
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(2*cm, height-2*cm, title)
+    c.setFont("Helvetica", 10)
+    y = height-3*cm
+
+    for name, df in tables.items():
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(2*cm, y, name)
+        y -= 0.7*cm
+
+        # imprime só um resumo (primeiras linhas) para caber no PDF
+        preview = df.head(20).copy()
+        cols = list(preview.columns)[:10]  # limita colunas no PDF
+        preview = preview[cols]
+
+        c.setFont("Helvetica", 8)
+        text = c.beginText(2*cm, y)
+        text.textLine(" | ".join([str(x) for x in cols]))
+        for _, row in preview.iterrows():
+            text.textLine(" | ".join([_to_str(row[col])[:50] for col in cols]))
+        c.drawText(text)
+
+        y -= (len(preview)+3) * 0.35*cm
+        if y < 3*cm:
+            c.showPage()
+            y = height-2*cm
+
+    c.save()
+    bio.seek(0)
+    return bio.getvalue()
+
+try:
+    pdf_bytes = make_pdf_simple("Relatório Shopee Auditor (PDF)", tables_for_report)
+    st.download_button(
+        "Baixar PDF (bonito, estático)",
+        data=pdf_bytes,
+        file_name="relatorio_shopee.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+except Exception as e:
+    st.warning("Para gerar PDF, instale 'reportlab' no requirements.txt do Streamlit Cloud.")
