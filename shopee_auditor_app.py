@@ -11,6 +11,7 @@ st.set_page_config(page_title="Shopee Ads Auditor (Campanha + Loja)", layout="wi
 if "REPORT_TABLES" not in st.session_state:
     st.session_state["REPORT_TABLES"] = {}
 
+REPORT_TABLES = st.session_state["REPORT_TABLES"]
 
 # ============================
 # 1) Parsing / utils numéricos
@@ -1328,7 +1329,7 @@ export_tables: dict[str, pd.DataFrame] = {}
 
 # ✅ 1) Exporta o que aparece no app (formatado, com Sinal/O que fazer/Motivos)
 for name in EXPORT_ORDER:
-    df = REPORT_TABLES.get(name)
+    df = st.session_state["REPORT_TABLES"].get(name)
     if isinstance(df, pd.DataFrame) and not df.empty:
         export_tables[name] = df.copy()
 
