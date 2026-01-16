@@ -807,7 +807,12 @@ with tabs[0]:
             "TACOS",
             "ROAS",
         ]
-        st.dataframe(disp[cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
+        final_df = disp[cols].sort_values(by="Campanha").copy()
+        st.dataframe(final_df, use_container_width=True, hide_index=True)
+
+        # ✅ salva igual ao app
+        REPORT_TABLES["Campanhas (decisão)"] = final_df
+
 
 
 # ============================
@@ -888,7 +893,11 @@ with tabs[1]:
                     disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
 
                     cols = ["Sinal", "prod_key", "Produto", "Faturamento", "Pedidos", "Impressões", "Cliques", "CTR", "CVR", "O que fazer"]
-                    st.dataframe(disp[cols].sort_values(by="Faturamento", ascending=False), use_container_width=True, hide_index=True)
+                    final_df = disp[cols].sort_values(by="Faturamento", ascending=False).copy()
+                    st.dataframe(final_df, use_container_width=True, hide_index=True)
+
+                    REPORT_TABLES["Oportunidades - Loja → Ads"] = final_df
+
 
     # 2.2) Ads bons com pouca impressão (mês atual)
     with t2:
@@ -939,7 +948,11 @@ with tabs[1]:
                 disp["ACOS"] = disp["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
 
                 cols = ["Sinal", "Campanha", "Produto/Anúncio", "ID", "Impressões", "Cliques", "CTR", "CVR", "GMV", "Despesas", "ACOS", "O que fazer"]
-                st.dataframe(disp[cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
+                final_df = disp[cols].sort_values(by="Campanha").copy()
+                st.dataframe(final_df, use_container_width=True, hide_index=True)
+
+                REPORT_TABLES["Oportunidades - Ads baixa impressão"] = final_df
+
 
     # 2.3) Gastando sem converter (mês atual)
     with t3:
@@ -980,7 +993,11 @@ with tabs[1]:
                 disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
 
                 cols = ["Sinal", "Campanha", "Produto/Anúncio", "ID", "Impressões", "Cliques", "CTR", "Pedidos", "CVR", "Despesas", "O que fazer"]
-                st.dataframe(disp[cols].sort_values(by="Despesas", ascending=False), use_container_width=True, hide_index=True)
+                final_df = disp[cols].sort_values(by="Despesas", ascending=False).copy()
+                st.dataframe(final_df, use_container_width=True, hide_index=True)
+
+                REPORT_TABLES["Oportunidades - Gastando sem converter"] = final_df
+
 
 
 # ============================
@@ -1047,7 +1064,10 @@ with tabs[2]:
         disp["ROAS atual"] = disp["ROAS_curr"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
 
         cols = ["Sinal", "Campanha", "GMV ant", "GMV atual", "Δ GMV %", "Gasto atual", "CVR atual", "ACOS atual", "TACOS atual", "ROAS atual", "O que fazer", "Motivos"]
-        st.dataframe(disp[cols].sort_values(by="Campanha"), use_container_width=True, hide_index=True)
+        final_df = disp[cols].sort_values(by="Campanha").copy()
+        st.dataframe(final_df, use_container_width=True, hide_index=True)
+
+        REPORT_TABLES["Ads MoM (Campanhas)"] = final_df
 
 
 # ============================
@@ -1128,7 +1148,10 @@ with tabs[3]:
         disp["ROAS atual"] = disp["ROAS_curr"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
 
         cols = ["Sinal", "Campanha", "Produto/Anúncio", "ID", "GMV ant", "GMV atual", "Δ GMV %", "Imp atual", "CTR atual", "CVR atual", "ACOS atual", "ROAS atual", "O que fazer", "Motivos"]
-        st.dataframe(disp[cols].sort_values(by=["Campanha", "Produto/Anúncio"]), use_container_width=True, hide_index=True)
+        final_df = disp[cols].sort_values(by=["Campanha", "Produto/Anúncio"]).copy()
+        st.dataframe(final_df, use_container_width=True, hide_index=True)
+
+        REPORT_TABLES["Ads MoM (Anúncios)"] = final_df
 
 
 # ============================
@@ -1276,26 +1299,52 @@ with tabs[4]:
         disp["CVR atual"] = disp["cvr_curr"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
 
         cols = ["Sinal", "prod_key", "Produto", "Fat ant", "Fat atual", "Δ Fat %", "Imp atual", "CTR atual", "CVR atual", "O que fazer", "Motivos"]
-        st.dataframe(disp[cols].sort_values(by=["Sinal", "Fat atual"], ascending=[True, False]), use_container_width=True, hide_index=True)
+        final_df = disp[cols].sort_values(by=["Sinal", "Fat atual"], ascending=[True, False]).copy()
+        st.dataframe(final_df, use_container_width=True, hide_index=True)
+
+        REPORT_TABLES["Produtos (Loja) MoM"] = final_df
 
 
 # ============================
-# 15) Exportar Excel (tudo que está aparecendo)
+# 15) Exportar Excel (igual ao app)
 # ============================
 st.divider()
 st.header("Exportar relatório (Excel)")
 
-export_tables = {
-    "ADS_Base_Atual": df_all.copy(),
-}
+EXPORT_ORDER = [
+    "Campanhas (decisão)",
+    "Oportunidades - Loja → Ads",
+    "Oportunidades - Ads baixa impressão",
+    "Oportunidades - Gastando sem converter",
+    "Ads MoM (Campanhas)",
+    "Ads MoM (Anúncios)",
+    "Produtos (Loja) MoM",
+]
+
+export_tables: dict[str, pd.DataFrame] = {}
+
+# ✅ 1) Exporta o que aparece no app (formatado, com Sinal/O que fazer/Motivos)
+for name in EXPORT_ORDER:
+    df = REPORT_TABLES.get(name)
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        export_tables[name] = df.copy()
+
+# ✅ 2) Opcional: coloca as bases no final (pra auditoria)
+export_tables["ADS_Base_Atual"] = df_all.copy()
 if not df_prev.empty:
     export_tables["ADS_Base_Anterior"] = df_prev.copy()
 
 xlsx_bytes = make_excel_export(export_tables)
+
 st.download_button(
-    "Baixar relatório Excel",
+    "Baixar relatório Excel (igual ao app)",
     data=xlsx_bytes,
-    file_name="shopee_auditoria_relatorio.xlsx",
+    file_name="shopee_auditoria_relatorio_app.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
+
+with st.expander("Diagnóstico do export"):
+    st.write("Abas exportadas:")
+    st.write(list(export_tables.keys()))
+
