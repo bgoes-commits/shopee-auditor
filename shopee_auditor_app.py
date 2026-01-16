@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from io import StringIO
 from pathlib import Path
 
@@ -121,10 +122,8 @@ def normalize_product_id(s: str) -> str:
     if not t or t in {"-", "nan", "None"}:
         return ""
 
-    # troca vírgula por ponto p/ float científico
     tt = t.replace(",", ".")
     try:
-        # se for notação científica
         if "e" in tt.lower():
             v = float(tt)
             if np.isfinite(v):
@@ -132,22 +131,25 @@ def normalize_product_id(s: str) -> str:
     except Exception:
         pass
 
-    # se for número normal (só dígitos), mantém
     t_digits = re.sub(r"\D", "", t)
     return t_digits if t_digits else t
 
 
 def detect_csv_header_row(text: str) -> int:
     lines = text.splitlines()
-    # Shopee costuma ter '#,' no header real
-    for i, line in enumerate(lines[:200]):
-        if line.startswith("#,"):
-            return i
-    # fallback: detectar linha com colunas principais
     for i, line in enumerate(lines[:300]):
+        if line.startswith("#,") or line.startswith("#;"):
+            return i
+    for i, line in enumerate(lines[:400]):
         if "Anúncio / Nome do Produto" in line and "ID do produto" in line:
             return i
     return 0
+
+
+def detect_delimiter(header_line: str) -> str:
+    candidates = [",", ";", "\t"]
+    counts = {sep: header_line.count(sep) for sep in candidates}
+    return max(counts, key=counts.get) if max(counts.values()) > 0 else ","
 
 
 def read_shopee_csv(uploaded_file) -> tuple[pd.DataFrame, dict]:
@@ -160,18 +162,24 @@ def read_shopee_csv(uploaded_file) -> tuple[pd.DataFrame, dict]:
     if meta_lines:
         meta["titulo"] = meta_lines[0].replace("\ufeff", "").strip()
     for ln in meta_lines[1:30]:
+        # meta geralmente vem com vírgula, mesmo quando o csv é ';'
         if "," in ln:
             k, v = ln.split(",", 1)
             meta[k.strip()] = v.strip()
 
-    # LER TUDO COMO TEXTO (CRÍTICO)
+    lines = text.splitlines()
+    header_line = lines[header_row] if header_row < len(lines) else ""
+    sep = detect_delimiter(header_line)
+    meta["sep_detectado"] = sep
+
     df = pd.read_csv(
         StringIO(text),
-        sep=",",
+        sep=sep,
         skiprows=header_row,
         dtype=str,
         keep_default_na=False,
         na_values=[],
+        engine="python",
     )
     df.columns = [c.strip() for c in df.columns]
     return df, meta
@@ -214,54 +222,30 @@ def parse_ads_table(df: pd.DataFrame) -> pd.DataFrame:
         elif c in ADS_NUMERIC_COLS:
             df2[c] = df2[c].apply(parse_number_br_aggressive)
 
-    # normaliza ID do produto
     if "ID do produto" in df2.columns:
         df2["ID do produto"] = df2["ID do produto"].apply(normalize_product_id)
 
     return df2
 
 
-def pick_first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return None
-
-
-def add_ads_metrics(df: pd.DataFrame) -> pd.DataFrame:
+def add_ads_metrics(df: pd.DataFrame, *, imp_col, clk_col, cost_col, orders_col, rev_col) -> pd.DataFrame:
     df = df.copy()
 
-    col_imp = pick_first_existing(df, ["Impressões", "Impressões do Produto"])
-    col_clk = pick_first_existing(df, ["Cliques", "Cliques de Produtos"])
-    col_cost = pick_first_existing(df, ["Despesas", "Custo"])
-    col_orders = pick_first_existing(df, ["Conversões Diretas", "Conversões", "Itens Vendidos Diretos", "Itens Vendidos"])
-    rev_col = pick_first_existing(df, ["GMV", "Receita direta"])
-
-    # garante numeric
-    for c in [col_imp, col_clk, col_cost, col_orders, rev_col]:
+    # garante numeric nas colunas efetivamente usadas
+    for c in [imp_col, clk_col, cost_col, orders_col, rev_col]:
         if c and c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df["ctr_calc"] = np.where(df[col_imp] > 0, df[col_clk] / df[col_imp], np.nan) if col_imp and col_clk else np.nan
-    df["cvr_calc"] = np.where(df[col_clk] > 0, df[col_orders] / df[col_clk], np.nan) if col_clk and col_orders else np.nan
+    df["ctr_calc"] = np.where((imp_col and clk_col and df[imp_col] > 0), df[clk_col] / df[imp_col], np.nan)
+    df["cvr_calc"] = np.where((clk_col and orders_col and df[clk_col] > 0), df[orders_col] / df[clk_col], np.nan)
 
-    df["cpc"] = np.where(df[col_clk] > 0, df[col_cost] / df[col_clk], np.nan) if col_cost and col_clk else np.nan
-    df["cpa"] = np.where(df[col_orders] > 0, df[col_cost] / df[col_orders], np.nan) if col_cost and col_orders else np.nan
+    df["cpc"] = np.where((cost_col and clk_col and df[clk_col] > 0), df[cost_col] / df[clk_col], np.nan)
+    df["cpa"] = np.where((cost_col and orders_col and df[orders_col] > 0), df[cost_col] / df[orders_col], np.nan)
 
     df["ctr_class"] = df["ctr_calc"].apply(classify_ctr)
     df["cvr_class"] = df["cvr_calc"].apply(classify_cvr)
 
-    # ACOS calc
-    if col_cost and rev_col:
-        df["acos_calc"] = np.where(df[rev_col] > 0, df[col_cost] / df[rev_col], np.nan)
-    else:
-        df["acos_calc"] = np.nan
-
-    df.attrs["imp_col"] = col_imp
-    df.attrs["clk_col"] = col_clk
-    df.attrs["cost_col"] = col_cost
-    df.attrs["orders_col"] = col_orders
-    df.attrs["rev_col"] = rev_col
+    df["acos_calc"] = np.where((cost_col and rev_col and df[rev_col] > 0), df[cost_col] / df[rev_col], np.nan)
 
     return df
 
@@ -309,7 +293,7 @@ def make_display_df(df: pd.DataFrame, imp_col, clk_col, cost_col, orders_col, re
         if c and c in out.columns:
             out[c] = out[c].apply(fmt_int)
 
-    for c in [cost_col, rev_col, "cpc", "cpa", "GMV", "Receita direta", "Despesas", "Custo"]:
+    for c in [cost_col, rev_col, "cpc", "cpa", "GMV", "Despesas", "Receita direta", "Custo"]:
         if c and c in out.columns:
             out[c] = out[c].apply(fmt_brl)
 
@@ -337,11 +321,9 @@ with st.sidebar:
 
 st.markdown(
     """
-**O que este app faz (igual ao seu print):**
-- Cada arquivo de **Grupo de Anúncios** vira uma **campanha**.
-- Dentro da campanha:
-  - **Linha sem ID** = **TOTAL da campanha**
-  - **Linhas com ID** = **anúncios**
+**Visualização igual ao seu print**
+- Em cada campanha, a **linha sem ID do produto** é o **TOTAL da campanha**.
+- As linhas com **ID do produto** são os **anúncios**.
 """
 )
 
@@ -360,13 +342,14 @@ if not ads_group_files:
 # 5) Carregar e unir tudo
 # ============================
 
-all_blocks = []
+frames = []
+metas = []
+
 for f in ads_group_files:
     df_raw, meta = read_shopee_csv(f)
     df = parse_ads_table(df_raw)
-    df = add_ads_metrics(df)
 
-    # nome da campanha vem do título/meta ou do nome do arquivo
+    # campanha / grupo
     group_name = meta.get("titulo", "")
     group_name = group_name.replace("\ufeff", "")
     group_name = group_name.replace("Ad Group -", "").replace("Report - Shopee Brasil", "").strip()
@@ -374,18 +357,44 @@ for f in ads_group_files:
         group_name = Path(getattr(f, "name", "grupo")).stem
 
     df["Campanha"] = group_name
-    all_blocks.append(df)
 
-df_all = pd.concat(all_blocks, ignore_index=True)
+    frames.append(df)
+    metas.append((group_name, meta))
 
-imp_col = df_all.attrs.get("imp_col") or pick_first_existing(df_all, ["Impressões", "Impressões do Produto"])
-clk_col = df_all.attrs.get("clk_col") or pick_first_existing(df_all, ["Cliques", "Cliques de Produtos"])
-cost_col = df_all.attrs.get("cost_col") or pick_first_existing(df_all, ["Despesas", "Custo"])
-orders_col = df_all.attrs.get("orders_col") or pick_first_existing(df_all, ["Conversões Diretas", "Conversões", "Itens Vendidos Diretos", "Itens Vendidos"])
-rev_col = df_all.attrs.get("rev_col") or pick_first_existing(df_all, ["GMV", "Receita direta"])
+df_all = pd.concat(frames, ignore_index=True)
+
+# ====== COLUNAS (fixo, pois nomes são exatos no seu excel) ======
+imp_col = "Impressões" if "Impressões" in df_all.columns else ("Impressões do Produto" if "Impressões do Produto" in df_all.columns else None)
+clk_col = "Cliques" if "Cliques" in df_all.columns else ("Cliques de Produtos" if "Cliques de Produtos" in df_all.columns else None)
+rev_col = "GMV" if "GMV" in df_all.columns else None
+cost_col = "Despesas" if "Despesas" in df_all.columns else ("Custo" if "Custo" in df_all.columns else None)
+
+orders_col = None
+for cand in ["Conversões Diretas", "Conversões", "Itens Vendidos Diretos", "Itens Vendidos"]:
+    if cand in df_all.columns:
+        orders_col = cand
+        break
+
+# ====== adiciona métricas depois do concat (attrs não se perdem assim) ======
+df_all = add_ads_metrics(
+    df_all,
+    imp_col=imp_col,
+    clk_col=clk_col,
+    cost_col=cost_col,
+    orders_col=orders_col,
+    rev_col=rev_col,
+)
+
+# DEBUG opcional (deixe ligado até validar)
+with st.expander("DEBUG (colunas e seleção)", expanded=False):
+    st.write("Colunas existentes:", [c for c in ["GMV", "Despesas", "Custo", "Receita direta"] if c in df_all.columns])
+    st.write("Selecionadas:", {"GMV": rev_col, "Despesas": cost_col, "Impressões": imp_col, "Cliques": clk_col, "Pedidos": orders_col})
+    if metas:
+        st.write("Separador detectado por arquivo (meta):")
+        st.json({name: m.get("sep_detectado") for name, m in metas})
 
 # ============================
-# 6) Visualização estruturada (campanha -> total + anúncios)
+# 6) Visualização estruturada
 # ============================
 
 st.header("Visualização Estruturada (Campanha → Total + Anúncios)")
@@ -402,7 +411,7 @@ name_col = "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in view.
 
 for camp, d in view.groupby("Campanha"):
     with st.expander(camp, expanded=(sel != "(todas)")):
-        # separação: TOTAL (sem ID) vs ANÚNCIOS (com ID)
+        # separação TOTAL vs ANÚNCIOS
         if id_col:
             id_clean = d[id_col].astype(str).str.strip()
             is_total = id_clean.isin(["", "-", "nan", "None"])
@@ -418,7 +427,7 @@ for camp, d in view.groupby("Campanha"):
         else:
             cols_total = [c for c in [
                 "Campanha",
-                name_col,  # normalmente aparece o nome do grupo na linha total
+                name_col,
                 imp_col,
                 clk_col,
                 "ctr_calc",
@@ -451,7 +460,6 @@ for camp, d in view.groupby("Campanha"):
                 "cpa",
             ] if c and c in df_ads.columns]
 
-            # ordena por gasto (mais relevante)
             if cost_col and cost_col in df_ads.columns:
                 df_ads = df_ads.sort_values(by=cost_col, ascending=False)
 
@@ -459,14 +467,14 @@ for camp, d in view.groupby("Campanha"):
             st.dataframe(disp_ads, use_container_width=True, hide_index=True)
 
 # ============================
-# 7) Alertas (opcional, no detalhe)
+# 7) Alertas (baseados nos anúncios)
 # ============================
 
 st.divider()
-st.header("Alertas (baseados nos anúncios)")
+st.header("Alertas (apenas anúncios com ID)")
 
 if id_col:
-    only_ads = df_all[df_all[id_col].astype(str).str.strip().apply(lambda x: x not in ["", "-", "nan", "None"])].copy()
+    only_ads = df_all[~df_all[id_col].astype(str).str.strip().isin(["", "-", "nan", "None"])].copy()
 else:
     only_ads = df_all.copy()
 
