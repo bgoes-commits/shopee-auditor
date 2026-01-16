@@ -287,22 +287,18 @@ def fmt_pct(x, digits: int = 2) -> str:
 def make_display_df(df: pd.DataFrame, imp_col, clk_col, cost_col, orders_col, rev_col) -> pd.DataFrame:
     out = df.copy()
 
-    # ints
     for c in [imp_col, clk_col, orders_col]:
         if c and c in out.columns:
             out[c] = out[c].apply(fmt_int)
 
-    # moeda (DEDUP para não formatar duas vezes)
+    # moeda (dedup p/ não formatar 2x e virar "")
     money_cols = [cost_col, rev_col, "cpc", "cpa"]
     money_cols = [c for c in money_cols if c and c in out.columns]
-    # dedup preservando ordem
     seen = set()
     money_cols = [c for c in money_cols if not (c in seen or seen.add(c))]
-
     for c in money_cols:
         out[c] = out[c].apply(fmt_brl)
 
-    # percent
     for c in ["ctr_calc", "cvr_calc", "acos_calc"]:
         if c in out.columns:
             out[c] = out[c].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
@@ -324,6 +320,11 @@ with st.sidebar:
     min_clicks_eval = st.number_input("Mín. cliques p/ avaliar CVR", value=30, step=5)
     min_spend_no_conv = st.number_input("Gasto mínimo p/ alerta sem conversão (R$)", value=50.0, step=10.0)
     low_impressions_threshold = st.number_input("Impressões baixas (oportunidade)", value=300, step=50)
+
+    st.divider()
+    st.header("Sinalização de Campanhas")
+    acos_target_pct = st.number_input("ACOS bom (meta) %", value=12.0, step=0.5)
+    acos_warn_pp = st.number_input("Tolerância p/ amarelo (+p.p.)", value=2.0, step=0.5)
 
 st.markdown(
     """
@@ -367,7 +368,7 @@ for f in ads_group_files:
 
 df_all = pd.concat(frames, ignore_index=True)
 
-# ====== COLUNAS (exato, como você falou) ======
+# ====== COLUNAS (exato) ======
 imp_col = "Impressões" if "Impressões" in df_all.columns else ("Impressões do Produto" if "Impressões do Produto" in df_all.columns else None)
 clk_col = "Cliques" if "Cliques" in df_all.columns else ("Cliques de Produtos" if "Cliques de Produtos" in df_all.columns else None)
 rev_col = "GMV" if "GMV" in df_all.columns else None
@@ -388,25 +389,118 @@ df_all = add_ads_metrics(
     rev_col=rev_col,
 )
 
-with st.expander("DEBUG (colunas e seleção)", expanded=False):
-    st.write("Colunas existentes:", [c for c in ["GMV", "Despesas", "Custo", "Receita direta"] if c in df_all.columns])
-    st.write("Selecionadas:", {"GMV": rev_col, "Despesas": cost_col, "Impressões": imp_col, "Cliques": clk_col, "Pedidos": orders_col})
+# ============================
+# 6A) VISÃO DE CAMPANHAS (totais)
+# ============================
+
+st.header("Visão Geral de Campanhas (totais)")
+
+id_col = "ID do produto" if "ID do produto" in df_all.columns else None
+name_col = "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in df_all.columns else None
+
+if id_col is None:
+    st.warning("Não encontrei a coluna 'ID do produto'. Não consigo separar TOTAL vs anúncios.")
+else:
+    id_clean = df_all[id_col].astype(str).str.strip()
+    is_total = id_clean.isin(["", "-", "nan", "None"])
+    camp_total = df_all[is_total].copy()
+
+    if camp_total.empty:
+        st.warning("Não encontrei linhas TOTAL (sem ID).")
+    else:
+        grp = camp_total.groupby("Campanha", dropna=False).agg({
+            imp_col: "sum" if imp_col else "sum",
+            clk_col: "sum" if clk_col else "sum",
+            orders_col: "sum" if orders_col else "sum",
+            rev_col: "sum" if rev_col else "sum",
+            cost_col: "sum" if cost_col else "sum",
+        }).reset_index()
+
+        grp = grp.rename(columns={
+            imp_col: "Impressões",
+            clk_col: "Cliques",
+            orders_col: "Pedidos",
+            rev_col: "GMV",
+            cost_col: "Despesas",
+        })
+
+        grp["CTR"] = np.where(grp["Impressões"].fillna(0) > 0, grp["Cliques"].fillna(0) / grp["Impressões"].fillna(0), np.nan)
+        grp["CVR"] = np.where(grp["Cliques"].fillna(0) > 0, grp["Pedidos"].fillna(0) / grp["Cliques"].fillna(0), np.nan)
+        grp["ACOS"] = np.where(grp["GMV"].fillna(0) > 0, grp["Despesas"].fillna(0) / grp["GMV"].fillna(0), np.nan)
+        grp["ROAS"] = np.where(grp["Despesas"].fillna(0) > 0, grp["GMV"].fillna(0) / grp["Despesas"].fillna(0), np.nan)
+        grp["ROI"] = np.where(grp["Despesas"].fillna(0) > 0, (grp["GMV"].fillna(0) - grp["Despesas"].fillna(0)) / grp["Despesas"].fillna(0), np.nan)
+
+        grp["CTR_status"] = grp["CTR"].apply(classify_ctr)
+        grp["CVR_status"] = grp["CVR"].apply(classify_cvr)
+
+        target = acos_target_pct / 100.0
+        warn = acos_warn_pp / 100.0
+
+        def acos_semaforo(x):
+            if pd.isna(x):
+                return "n/a"
+            if x <= target:
+                return "🟢 ok"
+            if x <= target + warn:
+                return "🟡 atenção"
+            return "🔴 crítico"
+
+        grp["ACOS_sinal"] = grp["ACOS"].apply(acos_semaforo)
+
+        camp_opts = ["(todas)"] + sorted(grp["Campanha"].dropna().unique().tolist())
+        sel_camp = st.selectbox("Filtrar campanha (visão geral)", camp_opts, index=0, key="camp_overview_filter")
+        view_c = grp.copy()
+        if sel_camp != "(todas)":
+            view_c = view_c[view_c["Campanha"] == sel_camp]
+
+        view_c = view_c.sort_values(by="Despesas", ascending=False)
+
+        disp = view_c.copy()
+        disp["Impressões"] = disp["Impressões"].apply(fmt_int)
+        disp["Cliques"] = disp["Cliques"].apply(fmt_int)
+        disp["Pedidos"] = disp["Pedidos"].apply(fmt_int)
+        disp["GMV"] = disp["GMV"].apply(fmt_brl)
+        disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
+        disp["CTR"] = disp["CTR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ACOS"] = disp["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        disp["ROAS"] = disp["ROAS"].apply(lambda v: "" if pd.isna(v) else str(round(v, 2)).replace(".", ","))
+        disp["ROI"] = disp["ROI"].apply(lambda v: fmt_pct(v, digits=1) if pd.notna(v) else "")
+
+        cols = [
+            "Campanha",
+            "GMV",
+            "Despesas",
+            "ACOS",
+            "ACOS_sinal",
+            "ROAS",
+            "ROI",
+            "Impressões",
+            "Cliques",
+            "CTR",
+            "CTR_status",
+            "Pedidos",
+            "CVR",
+            "CVR_status",
+        ]
+        st.dataframe(disp[cols], use_container_width=True, hide_index=True)
+
+        st.caption("CTR/CVR seguem sua lei. ACOS usa a meta e tolerância da sidebar (verde/amarelo/vermelho).")
+
+st.divider()
 
 # ============================
-# 6) Visualização estruturada
+# 6B) Visualização estruturada (Campanha → Total + Anúncios)
 # ============================
 
 st.header("Visualização Estruturada (Campanha → Total + Anúncios)")
 
 campaigns = sorted(df_all["Campanha"].dropna().unique().tolist())
-sel = st.selectbox("Filtrar campanha", ["(todas)"] + campaigns, index=0)
+sel = st.selectbox("Filtrar campanha (detalhe)", ["(todas)"] + campaigns, index=0, key="camp_detail_filter")
 
 view = df_all.copy()
 if sel != "(todas)":
     view = view[view["Campanha"] == sel]
-
-id_col = "ID do produto" if "ID do produto" in view.columns else None
-name_col = "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in view.columns else None
 
 for camp, d in view.groupby("Campanha"):
     with st.expander(camp, expanded=(sel != "(todas)")):
