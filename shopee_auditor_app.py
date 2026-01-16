@@ -1,5 +1,4 @@
 import re
-import unicodedata
 from io import StringIO
 from pathlib import Path
 
@@ -83,6 +82,7 @@ def parse_number_br_aggressive(x) -> float:
     - 238.065,00 -> 238065.00
     - 612.085 -> 612085
     - 32649.43 -> 32649.43
+    - 61223.00 -> 61223.00
     """
     s = _to_str(x)
     if not s or s.lower() in {"nan", "-"}:
@@ -137,10 +137,10 @@ def normalize_product_id(s: str) -> str:
 
 def detect_csv_header_row(text: str) -> int:
     lines = text.splitlines()
-    for i, line in enumerate(lines[:300]):
+    for i, line in enumerate(lines[:400]):
         if line.startswith("#,") or line.startswith("#;"):
             return i
-    for i, line in enumerate(lines[:400]):
+    for i, line in enumerate(lines[:600]):
         if "Anúncio / Nome do Produto" in line and "ID do produto" in line:
             return i
     return 0
@@ -162,7 +162,6 @@ def read_shopee_csv(uploaded_file) -> tuple[pd.DataFrame, dict]:
     if meta_lines:
         meta["titulo"] = meta_lines[0].replace("\ufeff", "").strip()
     for ln in meta_lines[1:30]:
-        # meta geralmente vem com vírgula, mesmo quando o csv é ';'
         if "," in ln:
             k, v = ln.split(",", 1)
             meta[k.strip()] = v.strip()
@@ -231,7 +230,6 @@ def parse_ads_table(df: pd.DataFrame) -> pd.DataFrame:
 def add_ads_metrics(df: pd.DataFrame, *, imp_col, clk_col, cost_col, orders_col, rev_col) -> pd.DataFrame:
     df = df.copy()
 
-    # garante numeric nas colunas efetivamente usadas
     for c in [imp_col, clk_col, cost_col, orders_col, rev_col]:
         if c and c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -289,14 +287,22 @@ def fmt_pct(x, digits: int = 2) -> str:
 def make_display_df(df: pd.DataFrame, imp_col, clk_col, cost_col, orders_col, rev_col) -> pd.DataFrame:
     out = df.copy()
 
+    # ints
     for c in [imp_col, clk_col, orders_col]:
         if c and c in out.columns:
             out[c] = out[c].apply(fmt_int)
 
-    for c in [cost_col, rev_col, "cpc", "cpa", "GMV", "Despesas", "Receita direta", "Custo"]:
-        if c and c in out.columns:
-            out[c] = out[c].apply(fmt_brl)
+    # moeda (DEDUP para não formatar duas vezes)
+    money_cols = [cost_col, rev_col, "cpc", "cpa"]
+    money_cols = [c for c in money_cols if c and c in out.columns]
+    # dedup preservando ordem
+    seen = set()
+    money_cols = [c for c in money_cols if not (c in seen or seen.add(c))]
 
+    for c in money_cols:
+        out[c] = out[c].apply(fmt_brl)
+
+    # percent
     for c in ["ctr_calc", "cvr_calc", "acos_calc"]:
         if c in out.columns:
             out[c] = out[c].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
@@ -349,7 +355,6 @@ for f in ads_group_files:
     df_raw, meta = read_shopee_csv(f)
     df = parse_ads_table(df_raw)
 
-    # campanha / grupo
     group_name = meta.get("titulo", "")
     group_name = group_name.replace("\ufeff", "")
     group_name = group_name.replace("Ad Group -", "").replace("Report - Shopee Brasil", "").strip()
@@ -357,13 +362,12 @@ for f in ads_group_files:
         group_name = Path(getattr(f, "name", "grupo")).stem
 
     df["Campanha"] = group_name
-
     frames.append(df)
     metas.append((group_name, meta))
 
 df_all = pd.concat(frames, ignore_index=True)
 
-# ====== COLUNAS (fixo, pois nomes são exatos no seu excel) ======
+# ====== COLUNAS (exato, como você falou) ======
 imp_col = "Impressões" if "Impressões" in df_all.columns else ("Impressões do Produto" if "Impressões do Produto" in df_all.columns else None)
 clk_col = "Cliques" if "Cliques" in df_all.columns else ("Cliques de Produtos" if "Cliques de Produtos" in df_all.columns else None)
 rev_col = "GMV" if "GMV" in df_all.columns else None
@@ -375,7 +379,6 @@ for cand in ["Conversões Diretas", "Conversões", "Itens Vendidos Diretos", "It
         orders_col = cand
         break
 
-# ====== adiciona métricas depois do concat (attrs não se perdem assim) ======
 df_all = add_ads_metrics(
     df_all,
     imp_col=imp_col,
@@ -385,13 +388,9 @@ df_all = add_ads_metrics(
     rev_col=rev_col,
 )
 
-# DEBUG opcional (deixe ligado até validar)
 with st.expander("DEBUG (colunas e seleção)", expanded=False):
     st.write("Colunas existentes:", [c for c in ["GMV", "Despesas", "Custo", "Receita direta"] if c in df_all.columns])
     st.write("Selecionadas:", {"GMV": rev_col, "Despesas": cost_col, "Impressões": imp_col, "Cliques": clk_col, "Pedidos": orders_col})
-    if metas:
-        st.write("Separador detectado por arquivo (meta):")
-        st.json({name: m.get("sep_detectado") for name, m in metas})
 
 # ============================
 # 6) Visualização estruturada
@@ -411,7 +410,6 @@ name_col = "Anúncio / Nome do Produto" if "Anúncio / Nome do Produto" in view.
 
 for camp, d in view.groupby("Campanha"):
     with st.expander(camp, expanded=(sel != "(todas)")):
-        # separação TOTAL vs ANÚNCIOS
         if id_col:
             id_clean = d[id_col].astype(str).str.strip()
             is_total = id_clean.isin(["", "-", "nan", "None"])
@@ -467,7 +465,7 @@ for camp, d in view.groupby("Campanha"):
             st.dataframe(disp_ads, use_container_width=True, hide_index=True)
 
 # ============================
-# 7) Alertas (baseados nos anúncios)
+# 7) Alertas (apenas anúncios com ID)
 # ============================
 
 st.divider()
