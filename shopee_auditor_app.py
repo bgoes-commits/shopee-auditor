@@ -1250,6 +1250,31 @@ with tabs[3]:
                 r.get("ROAS_prev", np.nan), r.get("ROAS_curr", np.nan),
                 float(roas_bom),
             )
+
+            # ✅ NOVO: se no MÊS ATUAL tiver 0 impressões -> verificar estoque/anúncio pausado
+            imp_curr = r.get("Impressões_curr", np.nan)
+            if pd.notna(imp_curr) and float(imp_curr) == 0.0:
+                acao = "Verificar estoque / anúncio pausado"
+                if motivos:
+                    motivos = motivos + " | 0 impressões no mês atual"
+                else:
+                    motivos = "0 impressões no mês atual"
+
+            # complementa com qualidade mês atual (lei CTR/CVR + baixa impressão)
+            q_sinal, q_acao = action_for_row_new(
+                r.get("CTR_curr", np.nan),
+                r.get("CVR_curr", np.nan),
+                r.get("Impressões_curr", np.nan),
+                low_imp_threshold=int(low_impressions_threshold)
+            )
+
+            acao_final = acao
+            if acao_final == "Monitorar" and q_acao:
+                acao_final = q_acao
+
+            mom.at[i, "Sinal"] = sinal
+            mom.at[i, "Motivos"] = motivos
+            mom.at[i, "O que fazer"] = acao_final
             # complementa com qualidade mês atual (lei CTR/CVR + baixa impressão)
             q_sinal, q_acao = action_for_row_new(r.get("CTR_curr", np.nan), r.get("CVR_curr", np.nan), r.get("Impressões_curr", np.nan), low_imp_threshold=int(low_impressions_threshold))
             acao_final = acao
