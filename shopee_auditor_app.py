@@ -950,6 +950,13 @@ with tabs[1]:
                 df["Despesas"] = pd.to_numeric(df[cost_col], errors="coerce") if cost_col else np.nan
                 df["Pedidos"] = pd.to_numeric(df[orders_col], errors="coerce") if orders_col else np.nan
         
+                # ✅ FIX: ACOS numérico calculado aqui (antes de qualquer filtro)
+                df["ACOS"] = np.where(
+                    df["GMV"].fillna(0) > 0,
+                    df["Despesas"].fillna(0) / df["GMV"].fillna(0),
+                    np.nan
+                )
+        
                 # ---------
                 # 1) métricas por campanha (dominância de gasto)
                 # ---------
@@ -991,7 +998,6 @@ with tabs[1]:
                 # - CTR bom + CVR bom
                 # - campanha dominada
                 # ---------
-                # gasto mediano por campanha (pra identificar "baixo" dentro daquela campanha)
                 med_spend = (
                     df.groupby(["Campanha_key"], dropna=False)["Gasto_anuncio"]
                     .median()
@@ -1000,13 +1006,12 @@ with tabs[1]:
                 )
                 df = df.merge(med_spend, on="Campanha_key", how="left")
         
-                # "gastou pouco" = abaixo da mediana OU <= 20% do top1
                 ratio_top1 = np.where(
                     df["Top1_gasto"].fillna(0) > 0,
                     df["Gasto_anuncio"].fillna(0) / df["Top1_gasto"].fillna(0),
                     np.nan
                 )
-                
+        
                 df["Gasto_baixo"] = (df["Gasto_anuncio"].fillna(0) <= df["Mediana_gasto"].fillna(0)) | (ratio_top1 <= 0.20)
         
                 ctr_bom = (ctr_bom_min_pct / 100.0)
@@ -1023,10 +1028,8 @@ with tabs[1]:
                 if cand.empty:
                     st.info("Nenhuma oportunidade encontrada (vendeu + CTR/CVR bons + pouco gasto em campanha dominada).")
                 else:
-                    # sinal = verde porque é oportunidade clara de escala
                     cand["Sinal"] = "🟢"
         
-                    # motivo direto + números
                     cand["Motivo"] = cand.apply(
                         lambda r: (
                             f"Vendeu com pouco gasto numa campanha dominada "
@@ -1039,7 +1042,6 @@ with tabs[1]:
                         axis=1
                     )
         
-                    # o que fazer objetivo (sem enrolar)
                     cand["O que fazer"] = "Criar campanha dedicada / separar do anúncio dominante e subir orçamento"
         
                     disp = cand.copy()
@@ -1052,22 +1054,10 @@ with tabs[1]:
                     disp["CVR"] = disp["CVR"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
                     disp["GMV"] = disp["GMV"].apply(fmt_brl)
                     disp["Despesas"] = disp["Despesas"].apply(fmt_brl)
-                    disp["ACOS"] = np.where(
-                        pd.to_numeric(cand["GMV"], errors="coerce").fillna(0) > 0,
-                        (pd.to_numeric(cand["Despesas"], errors="coerce").fillna(0) / pd.to_numeric(cand["GMV"], errors="coerce").fillna(0)),
-                        np.nan
-                    )
-                    # ACOS formatado
-                    # (disp["ACOS"] aqui é série numpy -> vamos calcular no próprio disp)
-                    # reaplica com base nos valores já numéricos:
-                    disp_acos = np.where(
-                        pd.to_numeric(cand["GMV"], errors="coerce").fillna(0) > 0,
-                        pd.to_numeric(cand["Despesas"], errors="coerce").fillna(0) / pd.to_numeric(cand["GMV"], errors="coerce").fillna(0),
-                        np.nan
-                    )
-                    disp["ACOS"] = pd.Series(disp_acos).apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
         
-                    # colunas enxutas (igual seu padrão)
+                    # ✅ FIX: ACOS vem do cand (numérico) e só formata aqui
+                    disp["ACOS"] = cand["ACOS"].apply(lambda v: fmt_pct(v) if pd.notna(v) else "")
+        
                     cols = [
                         "Sinal",
                         "Campanha",
@@ -1088,7 +1078,7 @@ with tabs[1]:
         
                     st.session_state["REPORT_TABLES"]["Oportunidades - Ads baixa impressão"] = final_df
 
-
+    
     # 2.3) Gastando sem converter (mês atual)
     with t3:
         if ads_rows_curr.empty:
