@@ -1262,88 +1262,75 @@ with tabs[4]:
 
 
 # ============================
-# 15) Exportar (Excel + HTML + PDF)
+# 15) BAIXAR TUDO (Excel + HTML + PDF)
 # ============================
 st.divider()
-st.header("Exportar relatório")
+st.header("Baixar relatório completo")
+
+# ✅ Se ainda não existir no topo do arquivo, crie:
+# REPORT_TABLES: dict[str, pd.DataFrame] = {}
+# E sempre que você fizer st.dataframe(...), registre a tabela:
+# REPORT_TABLES["Nome da seção"] = df_final.copy()
 
 # --------------------------------
-# A) Escolha as tabelas do relatório (AS QUE ESTÃO APARECENDO)
+# A) Excel COMPLETO (bases + todas as views exibidas)
 # --------------------------------
-# ✅ Aqui você adiciona as tabelas finais que você exibe na tela (já formatadas).
-# Exemplo (substitua pelos nomes reais do seu código):
-tables_for_report: dict[str, pd.DataFrame] = {}
+excel_tables: dict[str, pd.DataFrame] = {}
 
-# EXEMPLOS (DESCOMENTE E AJUSTE PARA SEU APP)
-# tables_for_report["Campanhas (decisão)"] = df_campanhas_display.copy()
-# tables_for_report["Oportunidades (Loja → Ads)"] = df_oportunidades_loja_display.copy()
-# tables_for_report["Oportunidades (Ads baixa impressão)"] = df_oportunidades_ads_display.copy()
-# tables_for_report["MoM Campanhas (Ads)"] = df_mom_campanhas_display.copy()
-# tables_for_report["MoM Anúncios (Ads)"] = df_mom_anuncios_display.copy()
-# tables_for_report["MoM Produtos (Loja)"] = df_mom_loja_display.copy()
-
-# --------------------------------
-# B) Excel (base bruta + opcionais)
-# --------------------------------
-st.subheader("Excel")
-
-export_tables = {
-    "ADS_Base_Atual": df_all.copy(),
-}
+# Bases brutas
+excel_tables["BASE_ADS_ATUAL"] = df_all.copy()
 if not df_prev.empty:
-    export_tables["ADS_Base_Anterior"] = df_prev.copy()
+    excel_tables["BASE_ADS_ANTERIOR"] = df_prev.copy()
 
-# Opcional: colocar também as tabelas “de tela” no Excel
-for k, v in tables_for_report.items():
-    if isinstance(v, pd.DataFrame) and not v.empty:
-        export_tables[f"VIEW_{k}"] = v.copy()
+# Views (tabelas que aparecem na tela)
+for name, df in REPORT_TABLES.items():
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        sheet = f"VIEW_{name}"
+        excel_tables[sheet] = df.copy()
 
-xlsx_bytes = make_excel_export(export_tables)
+xlsx_bytes = make_excel_export(excel_tables)
 
 st.download_button(
-    "Baixar relatório Excel",
+    "⬇️ Baixar Excel COMPLETO (tudo)",
     data=xlsx_bytes,
-    file_name="shopee_auditoria_relatorio.xlsx",
+    file_name="shopee_relatorio_completo.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
 
 # --------------------------------
-# C) HTML interativo
+# B) HTML INTERATIVO (todas as views) – ordena / filtra / busca
 # --------------------------------
-st.subheader("HTML interativo (ordenar / filtrar / buscar)")
-
-def df_to_html_table(df: pd.DataFrame, table_id: str) -> str:
-    return df.to_html(index=False, escape=True, table_id=table_id, classes="display compact", border=0)
-
-def make_interactive_html_report(title: str, tables: dict[str, pd.DataFrame]) -> str:
+def make_full_html_report(title: str, tables: dict[str, pd.DataFrame]) -> str:
     head = f"""
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>{title}</title>
-  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 24px; }}
-    h1 {{ margin-bottom: 8px; }}
-    h2 {{ margin-top: 28px; }}
-    .muted {{ color:#666; font-size: 12px; }}
-    table.dataTable {{ width: 100% !important; }}
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{title}</title>
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 24px; }}
+  h1 {{ margin-bottom: 8px; }}
+  h2 {{ margin-top: 28px; }}
+  .muted {{ color:#666; font-size: 12px; }}
+  table.dataTable {{ width: 100% !important; }}
+</style>
 </head>
 <body>
 <h1>{title}</h1>
-<p class="muted">Relatório exportado do app Shopee Auditor.</p>
+<p class="muted">Relatório completo exportado do app Shopee Auditor.</p>
 """
     body = ""
-    for i, (name, df) in enumerate(tables.items(), start=1):
+    idx = 0
+    for name, df in tables.items():
         if df is None or not isinstance(df, pd.DataFrame) or df.empty:
             continue
-        tid = f"tbl_{i}"
+        idx += 1
+        tid = f"tbl_{idx}"
         body += f"<h2>{name}</h2>\n"
-        body += df_to_html_table(df, tid)
+        body += df.to_html(index=False, escape=True, table_id=tid, classes="display compact", border=0)
         body += "\n"
 
     tail = """
@@ -1369,42 +1356,40 @@ def make_interactive_html_report(title: str, tables: dict[str, pd.DataFrame]) ->
 """
     return head + body + tail
 
-if not tables_for_report:
-    st.info("Para gerar HTML/PDF, você precisa adicionar as tabelas finais no dicionário `tables_for_report`.")
-else:
-    html_report = make_interactive_html_report("Relatório Shopee Auditor", tables_for_report)
+if REPORT_TABLES:
+    html_report = make_full_html_report("Relatório Shopee Auditor – Completo", REPORT_TABLES)
     st.download_button(
-        "Baixar HTML interativo",
+        "⬇️ Baixar HTML INTERATIVO (tudo)",
         data=html_report.encode("utf-8"),
-        file_name="relatorio_shopee_interativo.html",
+        file_name="shopee_relatorio_completo.html",
         mime="text/html",
         use_container_width=True,
     )
-    st.caption("Obs: HTML interativo usa internet (CDN). Se você quiser 100% offline, eu deixo embutido no arquivo.")
+    st.caption("Obs: HTML interativo usa internet (CDN). Se quiser 100% offline, posso embutir JS/CSS no arquivo.")
+else:
+    st.info("Ainda não há tabelas registradas em REPORT_TABLES. Registre as tabelas finais para habilitar HTML/PDF.")
 
 # --------------------------------
-# D) PDF (bonito, estático)
+# C) PDF EXECUTIVO (todas as views, com resumo por tabela)
 # --------------------------------
-st.subheader("PDF (bonito, estático)")
-
-def make_pdf_simple(title: str, tables: dict[str, pd.DataFrame]) -> bytes:
+def make_pdf_exec(title: str, tables: dict[str, pd.DataFrame]) -> bytes:
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import cm
 
-    def _to_str_local(x) -> str:
+    def _safe_str(x) -> str:
         if x is None:
             return ""
         return str(x)
 
     bio = BytesIO()
     c = canvas.Canvas(bio, pagesize=landscape(A4))
-    width, height = landscape(A4)
+    w, h = landscape(A4)
 
     c.setFont("Helvetica-Bold", 18)
-    c.drawString(2*cm, height-2*cm, title)
-    c.setFont("Helvetica", 10)
-    y = height-3*cm
+    c.drawString(2*cm, h - 2*cm, title)
+
+    y = h - 3.2*cm
 
     for name, df in tables.items():
         if df is None or not isinstance(df, pd.DataFrame) or df.empty:
@@ -1414,37 +1399,36 @@ def make_pdf_simple(title: str, tables: dict[str, pd.DataFrame]) -> bytes:
         c.drawString(2*cm, y, name)
         y -= 0.7*cm
 
-        preview = df.head(20).copy()
+        preview = df.head(12).copy()
         cols = list(preview.columns)[:10]
         preview = preview[cols]
 
         c.setFont("Helvetica", 8)
         text = c.beginText(2*cm, y)
-        text.textLine(" | ".join([str(x) for x in cols]))
 
+        text.textLine(" | ".join([_safe_str(x) for x in cols]))
         for _, row in preview.iterrows():
-            text.textLine(" | ".join([_to_str_local(row[col])[:60] for col in cols]))
+            text.textLine(" | ".join([_safe_str(row[col])[:60] for col in cols]))
 
         c.drawText(text)
 
         y -= (len(preview) + 3) * 0.35*cm
+
         if y < 3*cm:
             c.showPage()
-            y = height-2*cm
+            y = h - 2.5*cm
 
     c.save()
     bio.seek(0)
     return bio.getvalue()
 
-if not tables_for_report:
-    st.info("Para gerar PDF, você precisa adicionar as tabelas finais no `tables_for_report`.")
-else:
+if REPORT_TABLES:
     try:
-        pdf_bytes = make_pdf_simple("Relatório Shopee Auditor (PDF)", tables_for_report)
+        pdf_bytes = make_pdf_exec("Relatório Shopee Auditor – Executivo", REPORT_TABLES)
         st.download_button(
-            "Baixar PDF",
+            "⬇️ Baixar PDF EXECUTIVO",
             data=pdf_bytes,
-            file_name="relatorio_shopee.pdf",
+            file_name="shopee_relatorio_executivo.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
