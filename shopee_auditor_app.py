@@ -954,7 +954,7 @@ with tabs[1]:
                 final_df = disp[cols].sort_values(by="Campanha").copy()
                 st.dataframe(final_df, use_container_width=True, hide_index=True)
 
-               st.session_state["REPORT_TABLES"]["Oportunidades - Ads baixa impressão"] = final_df
+                st.session_state["REPORT_TABLES"]["Oportunidades - Ads baixa impressão"] = final_df
 
 
     # 2.3) Gastando sem converter (mês atual)
