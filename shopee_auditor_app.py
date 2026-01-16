@@ -1001,9 +1001,13 @@ with tabs[1]:
                 df = df.merge(med_spend, on="Campanha_key", how="left")
         
                 # "gastou pouco" = abaixo da mediana OU <= 20% do top1
-                df["Gasto_baixo"] = (df["Gasto_anuncio"].fillna(0) <= df["Mediana_gasto"].fillna(0)) | (
-                    df["Top1_gasto"].fillna(0) > 0 and (df["Gasto_anuncio"].fillna(0) / df["Top1_gasto"].fillna(0) <= 0.20)
+                ratio_top1 = np.where(
+                    df["Top1_gasto"].fillna(0) > 0,
+                    df["Gasto_anuncio"].fillna(0) / df["Top1_gasto"].fillna(0),
+                    np.nan
                 )
+                
+                df["Gasto_baixo"] = (df["Gasto_anuncio"].fillna(0) <= df["Mediana_gasto"].fillna(0)) | (ratio_top1 <= 0.20)
         
                 ctr_bom = (ctr_bom_min_pct / 100.0)
                 cvr_bom = (cvr_bom_min_pct / 100.0)
