@@ -1217,7 +1217,7 @@ with tabs[4]:
             prev_rev = r.get("rev_prev", np.nan)
             curr_rev = r.get("rev_curr", np.nan)
 
-            # ✅ NOVO: nunca vendeu (anterior=0 e atual=0) MAS tem impressão -> ação padrão "preço/imagem/cauda longa"
+            # ✅ NOVO: nunca vendeu (anterior=0 e atual=0) MAS tem impressão
     prev_ord = r.get("ord_prev", 0.0)
     curr_ord = r.get("ord_curr", 0.0)
     prev_imp = r.get("imp_prev", 0.0)
@@ -1230,7 +1230,8 @@ with tabs[4]:
         mom.at[i, "Sinal"] = "🟡"
         mom.at[i, "O que fazer"] = "Verificar preço + imagem + cauda longa"
         mom.at[i, "Motivos"] = "Teve impressões, mas não converteu em vendas (nunca vendeu)"
-        continue
+        continue    
+        
             if pd.notna(prev_rev) and prev_rev > 0 and pd.notna(curr_rev) and curr_rev < prev_rev:
                 mom.at[i, "Sinal"] = "🔴"
                 reasons = []
