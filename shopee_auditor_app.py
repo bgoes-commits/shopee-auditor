@@ -1262,175 +1262,22 @@ with tabs[4]:
 
 
 # ============================
-# 15) BAIXAR TUDO (Excel + HTML + PDF)
+# 15) Exportar Excel (tudo que está aparecendo)
 # ============================
 st.divider()
-st.header("Baixar relatório completo")
+st.header("Exportar relatório (Excel)")
 
-# ✅ Se ainda não existir no topo do arquivo, crie:
-# REPORT_TABLES: dict[str, pd.DataFrame] = {}
-# E sempre que você fizer st.dataframe(...), registre a tabela:
-# REPORT_TABLES["Nome da seção"] = df_final.copy()
-
-# --------------------------------
-# A) Excel COMPLETO (bases + todas as views exibidas)
-# --------------------------------
-excel_tables: dict[str, pd.DataFrame] = {}
-
-# Bases brutas
-excel_tables["BASE_ADS_ATUAL"] = df_all.copy()
+export_tables = {
+    "ADS_Base_Atual": df_all.copy(),
+}
 if not df_prev.empty:
-    excel_tables["BASE_ADS_ANTERIOR"] = df_prev.copy()
+    export_tables["ADS_Base_Anterior"] = df_prev.copy()
 
-# Views (tabelas que aparecem na tela)
-for name, df in REPORT_TABLES.items():
-    if isinstance(df, pd.DataFrame) and not df.empty:
-        sheet = f"VIEW_{name}"
-        excel_tables[sheet] = df.copy()
-
-xlsx_bytes = make_excel_export(excel_tables)
-
+xlsx_bytes = make_excel_export(export_tables)
 st.download_button(
-    "⬇️ Baixar Excel COMPLETO (tudo)",
+    "Baixar relatório Excel",
     data=xlsx_bytes,
-    file_name="shopee_relatorio_completo.xlsx",
+    file_name="shopee_auditoria_relatorio.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
-
-# --------------------------------
-# B) HTML INTERATIVO (todas as views) – ordena / filtra / busca
-# --------------------------------
-def make_full_html_report(title: str, tables: dict[str, pd.DataFrame]) -> str:
-    head = f"""
-<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>{title}</title>
-<link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
-<style>
-  body {{ font-family: Arial, sans-serif; margin: 24px; }}
-  h1 {{ margin-bottom: 8px; }}
-  h2 {{ margin-top: 28px; }}
-  .muted {{ color:#666; font-size: 12px; }}
-  table.dataTable {{ width: 100% !important; }}
-</style>
-</head>
-<body>
-<h1>{title}</h1>
-<p class="muted">Relatório completo exportado do app Shopee Auditor.</p>
-"""
-    body = ""
-    idx = 0
-    for name, df in tables.items():
-        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-            continue
-        idx += 1
-        tid = f"tbl_{idx}"
-        body += f"<h2>{name}</h2>\n"
-        body += df.to_html(index=False, escape=True, table_id=tid, classes="display compact", border=0)
-        body += "\n"
-
-    tail = """
-<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-<script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
-<script>
-  $(document).ready(function(){
-    $('table.display').DataTable({
-      pageLength: 25,
-      lengthMenu: [10, 25, 50, 100],
-      order: [],
-      language: {
-        search: "Buscar:",
-        lengthMenu: "Mostrar _MENU_ linhas",
-        info: "Mostrando _START_ a _END_ de _TOTAL_",
-        paginate: { previous: "Anterior", next: "Próximo" }
-      }
-    });
-  });
-</script>
-</body>
-</html>
-"""
-    return head + body + tail
-
-if REPORT_TABLES:
-    html_report = make_full_html_report("Relatório Shopee Auditor – Completo", REPORT_TABLES)
-    st.download_button(
-        "⬇️ Baixar HTML INTERATIVO (tudo)",
-        data=html_report.encode("utf-8"),
-        file_name="shopee_relatorio_completo.html",
-        mime="text/html",
-        use_container_width=True,
-    )
-    st.caption("Obs: HTML interativo usa internet (CDN). Se quiser 100% offline, posso embutir JS/CSS no arquivo.")
-else:
-    st.info("Ainda não há tabelas registradas em REPORT_TABLES. Registre as tabelas finais para habilitar HTML/PDF.")
-
-# --------------------------------
-# C) PDF EXECUTIVO (todas as views, com resumo por tabela)
-# --------------------------------
-def make_pdf_exec(title: str, tables: dict[str, pd.DataFrame]) -> bytes:
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import cm
-
-    def _safe_str(x) -> str:
-        if x is None:
-            return ""
-        return str(x)
-
-    bio = BytesIO()
-    c = canvas.Canvas(bio, pagesize=landscape(A4))
-    w, h = landscape(A4)
-
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(2*cm, h - 2*cm, title)
-
-    y = h - 3.2*cm
-
-    for name, df in tables.items():
-        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-            continue
-
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(2*cm, y, name)
-        y -= 0.7*cm
-
-        preview = df.head(12).copy()
-        cols = list(preview.columns)[:10]
-        preview = preview[cols]
-
-        c.setFont("Helvetica", 8)
-        text = c.beginText(2*cm, y)
-
-        text.textLine(" | ".join([_safe_str(x) for x in cols]))
-        for _, row in preview.iterrows():
-            text.textLine(" | ".join([_safe_str(row[col])[:60] for col in cols]))
-
-        c.drawText(text)
-
-        y -= (len(preview) + 3) * 0.35*cm
-
-        if y < 3*cm:
-            c.showPage()
-            y = h - 2.5*cm
-
-    c.save()
-    bio.seek(0)
-    return bio.getvalue()
-
-if REPORT_TABLES:
-    try:
-        pdf_bytes = make_pdf_exec("Relatório Shopee Auditor – Executivo", REPORT_TABLES)
-        st.download_button(
-            "⬇️ Baixar PDF EXECUTIVO",
-            data=pdf_bytes,
-            file_name="shopee_relatorio_executivo.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-    except Exception:
-        st.warning("Para gerar PDF no Streamlit Cloud, adicione `reportlab` no requirements.txt.")
